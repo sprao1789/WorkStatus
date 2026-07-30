@@ -267,13 +267,19 @@ async function fetchUserManagerSnapshot(authHeader, user, userId, start, end) {
   const from = toUtcDatetime(start, false);
   const to   = toUtcDatetime(end, true);
 
-  const [taskTimeline, dealTimeline, bugReportedTimeline] = await Promise.all([
+  const [taskTimeline, dealTimeline, bugReportedTimeline, visualWorkItems] = await Promise.all([
     coqlFetchAll(authHeader, ['id','Subject','Status','Created_Time','Modified_Time'], 'Tasks',
       `Owner = '${userId}' AND Created_Time between '${from}' and '${to}'`, 200),
     coqlFetchAll(authHeader, ['id','Deal_Name','Stage','Created_Time','Closing_Date'], 'Deals',
       `Owner = '${userId}' AND Created_Time between '${from}' and '${to}'`, 200),
     coqlFetchAll(authHeader, ['id','Name','Status','Severity','Created_Time'], BUGS_MODULE,
-      `Created_By = '${userId}' AND Created_Time between '${from}' and '${to}'`, 200)
+      `Created_By = '${userId}' AND Created_Time between '${from}' and '${to}'`, 200),
+    // Visual Test status currently wired only for Paparao from QA_Audit_LoadTesting.
+    // This module maps Paparao correctly through Automation_Developer.
+    user.email === 'paparao.s@zohocorp.com'
+      ? coqlFetchAll(authHeader, ['id','Name','UI_cases_added','LoadTesting_Status','Modified_Time'], 'QA_Audit_LoadTesting',
+          `Automation_Developer = '${userId}'`, 500)
+      : Promise.resolve([])
   ]);
 
   const timeline = [];
@@ -301,11 +307,27 @@ async function fetchUserManagerSnapshot(authHeader, user, userId, start, end) {
     id: b.id,
     icon: '🐛'
   }));
+  visualWorkItems.forEach(v => timeline.push({
+    type: 'visual',
+    title: v.Name || '(visual feature)',
+    status: v.UI_cases_added || 'Unknown',
+    when: v.Modified_Time,
+    id: v.id,
+    icon: '🖼️'
+  }));
   timeline.sort((a,b) => String(b.when || '').localeCompare(String(a.when || '')));
+
+  const visualStatusCounts = {};
+  visualWorkItems.forEach(v => {
+    const s = v.UI_cases_added || 'Unknown';
+    visualStatusCounts[s] = (visualStatusCounts[s] || 0) + 1;
+  });
 
   return {
     ...summary,
     timeline: timeline.slice(0, 50),
+    visual_work_items: visualWorkItems,
+    visual_status_counts: visualStatusCounts,
     calls_available: false,
     calls_permission_note: 'Calls data unavailable: missing Crm_Implied_View_Calls permission'
   };
@@ -314,6 +336,13 @@ async function fetchUserManagerSnapshot(authHeader, user, userId, start, end) {
 function buildManagerHTML(periodLabel, snapshots, baseUrl, start, end) {
   const cards = snapshots.map(s => {
     const totalActivity = s.bugs_reported + s.tasks_assigned + s.deals_owned;
+    const visualBlock = s.email === 'paparao.s@zohocorp.com' ? `
+      <div class="mgr-visual-block">
+        <div class="mgr-visual-title">🖼️ Visual Test Status</div>
+        <div class="mgr-visual-chips">
+          ${Object.entries(s.visual_status_counts || {}).map(([status,count]) => `<div class="vchip"><span>${count}</span>${status}</div>`).join('') || '<div class="mgr-empty">No visual test records</div>'}
+        </div>
+      </div>` : '';
     return `
     <div class="mgr-user-card">
       <div class="mgr-user-top">
@@ -334,6 +363,7 @@ function buildManagerHTML(periodLabel, snapshots, baseUrl, start, end) {
         <div class="metric gray"><span>${s.calls_available ? s.calls_made : '—'}</span><small>Calls</small></div>
       </div>
       <div class="mgr-mini-note">Daily visible activity items: <b>${totalActivity}</b></div>
+      ${visualBlock}
       <div class="mgr-timeline">
         ${(s.timeline || []).slice(0,8).map(item => `
           <div class="tl-item">
@@ -384,6 +414,11 @@ function buildManagerHTML(periodLabel, snapshots, baseUrl, start, end) {
   .metric small{display:block;margin-top:5px;font-size:10px;color:var(--muted);text-transform:uppercase}
   .metric.red span{color:#fb7185}.metric.orange span{color:#fb923c}.metric.blue span{color:#60a5fa}.metric.purple span{color:#c084fc}.metric.emerald span{color:#34d399}.metric.amber span{color:#fbbf24}.metric.cyan span{color:#22d3ee}.metric.gray span{color:#94a3b8}
   .mgr-mini-note{font-size:11px;color:#cbd5e1;margin-bottom:10px}
+  .mgr-visual-block{margin-bottom:10px;padding:10px 0;border-top:1px solid #1e293b;border-bottom:1px solid #1e293b}
+  .mgr-visual-title{font-size:11px;color:#cbd5e1;font-weight:800;margin-bottom:8px;text-transform:uppercase;letter-spacing:.7px}
+  .mgr-visual-chips{display:flex;flex-wrap:wrap;gap:8px}
+  .vchip{background:#111827;border:1px solid #334155;border-radius:999px;padding:6px 10px;font-size:10px;color:#cbd5e1;font-weight:700}
+  .vchip span{margin-right:6px;color:#60a5fa;font-size:12px}
   .mgr-timeline{border-top:1px solid #1e293b;padding-top:10px;display:flex;flex-direction:column;gap:8px}
   .tl-item{display:flex;gap:10px;align-items:flex-start;background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px}
   .tl-icon{width:28px;height:28px;border-radius:8px;background:#111827;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
