@@ -398,26 +398,28 @@ function buildWidgetHTML(monthName, teamStats, baseUrl) {
 }
 
 // ─── Build Detail HTML ────────────────────────────────────────────────────────
-function buildDetailHTML(userName, monthName, detail, baseUrl) {
+function buildDetailHTML(userName, monthName, detail, baseUrl, queryParams) {
   const { allBugs, reportedThisMonth, resolvedThisMonth, statusCount } = detail;
+  const { userId, userName: uName, start, end, year, month } = queryParams;
 
-  // Status breakdown bars
+  // Embed all bug data as JSON for client-side filtering
+  const allBugsJson      = JSON.stringify(allBugs);
+  const reportedJson     = JSON.stringify(reportedThisMonth);
+  const resolvedJson     = JSON.stringify(resolvedThisMonth);
+
+  // Status breakdown clickable bars
+  const maxCount = Math.max(...Object.values(statusCount), 1);
   const statusBars = Object.entries(statusCount).sort((a,b)=>b[1]-a[1]).map(([status, count]) => {
     const color = STATUS_COLORS[status] || '#aaa';
-    const max = Math.max(...Object.values(statusCount));
-    const pct = Math.round((count/max)*100);
-    return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
-      <div style="width:140px;font-size:11px;color:#555;text-align:right;flex-shrink:0">${status}</div>
-      <div style="flex:1;background:#f0f0f0;border-radius:4px;height:14px;overflow:hidden">
-        <div style="width:${pct}%;background:${color};height:100%;border-radius:4px"></div>
+    const pct   = Math.round((count/maxCount)*100);
+    return `<div class="status-bar-row" onclick="filterByStatus('${status.replace(/'/g,"\\'")}',this)" title="Click to filter bugs by: ${status}">
+      <div class="status-label">${status}</div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
       </div>
-      <div style="width:30px;font-size:12px;font-weight:700;color:${color}">${count}</div>
+      <div class="bar-count" style="color:${color}">${count}</div>
     </div>`;
   }).join('');
-
-  const allBugsRows    = allBugs.map(b => bugRow(b, baseUrl)).join('');
-  const reportedRows   = reportedThisMonth.map(b => bugRow(b, baseUrl)).join('');
-  const resolvedRows   = resolvedThisMonth.map(b => bugRow(b, baseUrl)).join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -427,74 +429,363 @@ function buildDetailHTML(userName, monthName, detail, baseUrl) {
 <title>${userName} — Bug Details</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f8;color:#222;padding:16px}
-  .back-btn{display:inline-block;margin-bottom:16px;color:#1971c2;font-weight:700;text-decoration:none;font-size:13px}
-  .back-btn:hover{text-decoration:underline}
-  .page-header{background:linear-gradient(135deg,#1971c2,#1c4587);color:#fff;border-radius:14px;padding:20px 28px;margin-bottom:20px}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f8;color:#222;padding:16px;font-size:14px}
+  a.back-btn{display:inline-flex;align-items:center;gap:6px;margin-bottom:14px;color:#1971c2;font-weight:700;text-decoration:none;font-size:13px;padding:6px 12px;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+  a.back-btn:hover{background:#e7f5ff}
+  .page-header{background:linear-gradient(135deg,#1971c2,#1c4587);color:#fff;border-radius:14px;padding:18px 24px;margin-bottom:16px}
   .page-header h1{font-size:20px;font-weight:800}
-  .page-header p{font-size:13px;opacity:.85;margin-top:3px}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
-  .card{background:#fff;border-radius:14px;padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.07)}
-  .card h2{font-size:14px;font-weight:700;color:#333;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+  .page-header .subtitle{font-size:12px;opacity:.8;margin-top:4px}
+
+  /* Filter bar */
+  .filter-bar{background:#fff;border-radius:12px;padding:14px 18px;margin-bottom:14px;box-shadow:0 2px 8px rgba(0,0,0,.06);display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+  .filter-bar label{font-size:12px;font-weight:700;color:#666;white-space:nowrap}
+  .filter-bar input[type=date]{border:1px solid #dee2e6;border-radius:6px;padding:5px 10px;font-size:12px;color:#333}
+  .filter-bar select{border:1px solid #dee2e6;border-radius:6px;padding:5px 10px;font-size:12px;color:#333;background:#fff}
+  .btn{padding:6px 14px;border-radius:8px;border:none;font-size:12px;font-weight:700;cursor:pointer}
+  .btn-primary{background:#1971c2;color:#fff}
+  .btn-primary:hover{background:#1864ab}
+  .btn-outline{background:#fff;color:#1971c2;border:1.5px solid #1971c2}
+  .btn-outline:hover{background:#e7f5ff}
+  .active-filter-tag{display:inline-flex;align-items:center;gap:6px;background:#e7f5ff;color:#1971c2;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px}
+  .active-filter-tag button{border:none;background:none;color:#1971c2;cursor:pointer;font-size:13px;line-height:1;padding:0}
+
+  /* Summary stats */
+  .summary-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:14px}
+  .stat-card{background:#fff;border-radius:12px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.06);cursor:pointer;border:2px solid transparent;transition:border-color .15s,transform .1s}
+  .stat-card:hover{transform:translateY(-1px)}
+  .stat-card.active{border-color:currentColor}
+  .stat-card .val{font-size:28px;font-weight:800;line-height:1}
+  .stat-card .lbl{font-size:11px;font-weight:600;color:#888;text-transform:uppercase;margin-top:4px}
+  .stat-card .sub{font-size:10px;color:#bbb;margin-top:2px}
+
+  /* Status breakdown */
+  .grid2{display:grid;grid-template-columns:320px 1fr;gap:14px;margin-bottom:14px}
+  .card{background:#fff;border-radius:12px;padding:18px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+  .card h2{font-size:13px;font-weight:700;color:#444;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
+  .status-bar-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer;padding:4px 6px;border-radius:6px;transition:background .12s}
+  .status-bar-row:hover,.status-bar-row.selected{background:#f0f4ff}
+  .status-label{width:170px;font-size:11px;color:#555;text-align:right;flex-shrink:0}
+  .bar-track{flex:1;background:#f0f0f0;border-radius:4px;height:12px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:4px;transition:width .3s}
+  .bar-count{width:28px;font-size:12px;font-weight:800;text-align:right}
+
+  /* Bug table */
+  .table-section{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:14px;overflow:hidden}
+  .table-section .table-header{padding:14px 18px;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between}
+  .table-section .table-header h2{font-size:13px;font-weight:700;color:#444}
+  .table-section .table-header .count-badge{font-size:11px;background:#f0f4ff;color:#1971c2;padding:2px 10px;border-radius:12px;font-weight:700}
+  .search-box{padding:8px 18px;border-bottom:1px solid #f5f5f5}
+  .search-box input{width:100%;padding:6px 12px;border:1px solid #dee2e6;border-radius:8px;font-size:12px;color:#333}
   table{width:100%;border-collapse:collapse}
-  th{text-align:left;font-size:11px;font-weight:700;color:#999;text-transform:uppercase;padding:6px 12px;border-bottom:2px solid #f0f0f0}
-  tr:hover td{background:#fafafa}
-  .empty{color:#999;font-size:13px;padding:16px;text-align:center}
-  @media(max-width:700px){.grid2{grid-template-columns:1fr}}
+  thead th{text-align:left;font-size:10px;font-weight:700;color:#aaa;text-transform:uppercase;padding:8px 12px;border-bottom:2px solid #f0f0f0;white-space:nowrap}
+  tbody tr{transition:background .1s}
+  tbody tr:hover td{background:#f8f9ff}
+  .empty{color:#aaa;font-size:13px;padding:24px;text-align:center}
+  .pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 18px;border-top:1px solid #f0f0f0;font-size:12px;color:#666}
+  .pagination button{padding:4px 12px;border-radius:6px;border:1px solid #dee2e6;background:#fff;cursor:pointer;font-size:12px}
+  .pagination button:disabled{opacity:.4;cursor:default}
+  .pagination button.active{background:#1971c2;color:#fff;border-color:#1971c2}
+
+  footer{text-align:center;margin-top:16px;font-size:11px;color:#bbb}
+  footer a{color:#1971c2;font-weight:700;text-decoration:none;margin:0 6px}
+  @media(max-width:700px){.grid2{grid-template-columns:1fr}.summary-grid{grid-template-columns:repeat(3,1fr)}}
 </style>
 </head>
 <body>
-<a class="back-btn" href="${baseUrl}/widget">← Back to Team Dashboard</a>
+
+<a class="back-btn" href="${baseUrl}/widget">← Team Dashboard</a>
 
 <div class="page-header">
-  <h1>🐛 ${userName} — Bug Details</h1>
-  <p>${monthName} &nbsp;·&nbsp; Active bugs owned · Reported this month · Resolved this month</p>
+  <h1>🐛 ${userName}</h1>
+  <div class="subtitle">Bug Details &nbsp;·&nbsp; <span id="periodLabel">${monthName}</span> &nbsp;·&nbsp; Click any stat or status bar to filter the table below</div>
 </div>
 
+<!-- Date/Filter bar -->
+<div class="filter-bar">
+  <label>📅 From</label>
+  <input type="date" id="dateFrom" value="${start}">
+  <label>To</label>
+  <input type="date" id="dateTo" value="${end}">
+  <button class="btn btn-primary" onclick="applyDateFilter()">Apply</button>
+  <button class="btn btn-outline" onclick="resetFilters()">Reset</button>
+  <div id="activeFilterTag" style="display:none" class="active-filter-tag">
+    Filtered: <span id="filterLabel"></span>
+    <button onclick="clearStatusFilter()">✕</button>
+  </div>
+  <div id="loadingIndicator" style="display:none;font-size:12px;color:#888">⏳ Loading...</div>
+</div>
+
+<!-- Summary stat cards -->
+<div class="summary-grid" id="summaryGrid">
+  <div class="stat-card" style="color:#e03131" onclick="showSection('active','all')">
+    <div class="val" id="cntActive">${allBugs.length}</div>
+    <div class="lbl">Active Bugs</div>
+    <div class="sub">All open/in-progress</div>
+  </div>
+  <div class="stat-card" style="color:#e03131" onclick="showSection('active','Open')">
+    <div class="val" id="cntOpen">${statusCount['Open']||0}</div>
+    <div class="lbl">Open</div>
+    <div class="sub">Not yet started</div>
+  </div>
+  <div class="stat-card" style="color:#e67700" onclick="showSection('active','In progress')">
+    <div class="val" id="cntInProgress">${statusCount['In progress']||0}</div>
+    <div class="lbl">In Progress</div>
+    <div class="sub">Being worked on</div>
+  </div>
+  <div class="stat-card" style="color:#1971c2" onclick="showSection('active','To be tested')">
+    <div class="val" id="cntToTest">${statusCount['To be tested']||0}</div>
+    <div class="lbl">To Be Tested</div>
+    <div class="sub">Ready for QA</div>
+  </div>
+  <div class="stat-card" style="color:#9c36b5" onclick="showSection('reported','all')">
+    <div class="val" id="cntReported">${reportedThisMonth.length}</div>
+    <div class="lbl">Reported ★</div>
+    <div class="sub">Filed this month</div>
+  </div>
+  <div class="stat-card" style="color:#2e7d32" onclick="showSection('resolved','all')">
+    <div class="val" id="cntResolved">${resolvedThisMonth.length}</div>
+    <div class="lbl">Resolved</div>
+    <div class="sub">Fixed/Closed this month</div>
+  </div>
+</div>
+
+<!-- Status Breakdown + Month Summary row -->
 <div class="grid2">
   <div class="card">
-    <h2>📊 Bug Status Breakdown (Active)</h2>
-    ${statusBars || '<div class="empty">No active bugs</div>'}
+    <h2>📊 Status Breakdown <small style="font-size:10px;color:#aaa;font-weight:400">(click to filter)</small></h2>
+    <div id="statusBars">${statusBars || '<div class="empty">No active bugs</div>'}</div>
   </div>
   <div class="card">
-    <h2>📅 This Month Summary</h2>
+    <h2>📅 This Month <span style="font-size:10px;color:#aaa;font-weight:400">${monthName}</span></h2>
     <table>
-      <tr><td style="padding:8px 0;font-size:13px;color:#555">Bugs reported this month</td><td style="padding:8px 0;font-size:18px;font-weight:800;color:#9c36b5">${reportedThisMonth.length}</td></tr>
-      <tr><td style="padding:8px 0;font-size:13px;color:#555">Bugs resolved/fixed this month</td><td style="padding:8px 0;font-size:18px;font-weight:800;color:#2e7d32">${resolvedThisMonth.length}</td></tr>
-      <tr><td style="padding:8px 0;font-size:13px;color:#555">Total active bugs (all time)</td><td style="padding:8px 0;font-size:18px;font-weight:800;color:#e03131">${allBugs.length}</td></tr>
+      <tr onclick="showSection('reported','all')" style="cursor:pointer">
+        <td style="padding:10px 0;font-size:13px;color:#555">📌 Bugs Reported</td>
+        <td style="padding:10px 0;font-size:22px;font-weight:800;color:#9c36b5;text-align:right" id="mReported">${reportedThisMonth.length}</td>
+      </tr>
+      <tr onclick="showSection('resolved','all')" style="cursor:pointer">
+        <td style="padding:10px 0;font-size:13px;color:#555">✅ Bugs Resolved/Fixed</td>
+        <td style="padding:10px 0;font-size:22px;font-weight:800;color:#2e7d32;text-align:right" id="mResolved">${resolvedThisMonth.length}</td>
+      </tr>
+      <tr onclick="showSection('active','all')" style="cursor:pointer">
+        <td style="padding:10px 0;font-size:13px;color:#555">🔴 Total Active</td>
+        <td style="padding:10px 0;font-size:22px;font-weight:800;color:#e03131;text-align:right" id="mActive">${allBugs.length}</td>
+      </tr>
     </table>
   </div>
 </div>
 
-<div class="card" style="margin-bottom:16px">
-  <h2>🔴 Active Bugs (All Time) <span style="font-size:12px;color:#aaa;font-weight:400">— ${allBugs.length} bugs</span></h2>
-  ${allBugs.length ? `<table>
-    <thead><tr><th>Bug Name</th><th>Status</th><th>Created</th><th>Last Updated</th></tr></thead>
-    <tbody>${allBugsRows}</tbody>
-  </table>` : '<div class="empty">No active bugs 🎉</div>'}
+<!-- Main bug table -->
+<div class="table-section">
+  <div class="table-header">
+    <h2 id="tableTitle">🔴 Active Bugs</h2>
+    <span class="count-badge" id="tableCount">${allBugs.length} bugs</span>
+  </div>
+  <div class="search-box">
+    <input type="text" id="searchInput" placeholder="🔍 Search by bug name..." oninput="renderTable()">
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th onclick="sortTable('Name')" style="cursor:pointer">Bug Name ↕</th>
+        <th onclick="sortTable('Status')" style="cursor:pointer">Status ↕</th>
+        <th onclick="sortTable('Severity')" style="cursor:pointer">Severity ↕</th>
+        <th onclick="sortTable('Created_Time')" style="cursor:pointer">Created ↕</th>
+        <th onclick="sortTable('Modified_Time')" style="cursor:pointer">Updated ↕</th>
+      </tr>
+    </thead>
+    <tbody id="bugTableBody"></tbody>
+  </table>
+  <div class="pagination" id="paginationBar"></div>
 </div>
 
-<div class="card" style="margin-bottom:16px">
-  <h2>📌 Bugs Reported This Month <span style="font-size:12px;color:#aaa;font-weight:400">— ${reportedThisMonth.length} bugs</span></h2>
-  ${reportedThisMonth.length ? `<table>
-    <thead><tr><th>Bug Name</th><th>Status</th><th>Created</th><th>Last Updated</th></tr></thead>
-    <tbody>${reportedRows}</tbody>
-  </table>` : '<div class="empty">No bugs reported this month</div>'}
-</div>
+<footer>
+  Updated: ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})} IST &nbsp;|&nbsp;
+  <a href="${baseUrl}/widget">← Team Dashboard</a>
+  <a href="https://crm.zoho.in/crm/crmlaunchpad/tab/CustomModule2" target="_blank">🌐 Open CRM Bugs</a>
+</footer>
 
-<div class="card" style="margin-bottom:16px">
-  <h2>✅ Resolved/Fixed This Month <span style="font-size:12px;color:#aaa;font-weight:400">— ${resolvedThisMonth.length} bugs</span></h2>
-  ${resolvedThisMonth.length ? `<table>
-    <thead><tr><th>Bug Name</th><th>Status</th><th>Created</th><th>Last Updated</th></tr></thead>
-    <tbody>${resolvedRows}</tbody>
-  </table>` : '<div class="empty">No bugs resolved this month</div>'}
-</div>
+<script>
+// ── Embedded data ──────────────────────────────────────────────────────────
+const DATA = {
+  active:   ${allBugsJson},
+  reported: ${reportedJson},
+  resolved: ${resolvedJson}
+};
 
-<div style="text-align:center;margin-top:16px;font-size:12px;color:#aaa">
-  Updated: ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})} IST
-  &nbsp;|&nbsp; <a href="${baseUrl}/widget" style="color:#1971c2;font-weight:700;text-decoration:none">← Back to Team Dashboard</a>
-  &nbsp;|&nbsp; <a href="https://crm.zoho.in/crm/crmlaunchpad/tab/CustomModule2" target="_blank" style="color:#e03131;font-weight:700;text-decoration:none">🌐 Open CRM Bugs</a>
-</div>
+const BASE_URL   = '${baseUrl}';
+const USER_ID    = '${userId}';
+const USER_NAME  = '${encodeURIComponent(uName || userName)}';
+
+// ── State ──────────────────────────────────────────────────────────────────
+let currentSection  = 'active';
+let currentStatus   = 'all';
+let currentSort     = { key: 'Created_Time', dir: -1 };
+let currentPage     = 1;
+const PAGE_SIZE     = 30;
+
+// ── Status colors ──────────────────────────────────────────────────────────
+const STATUS_COLORS = ${JSON.stringify(STATUS_COLORS)};
+
+function statusBadge(s) {
+  const c = STATUS_COLORS[s] || '#aaa';
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;color:#fff;background:'+c+';white-space:nowrap">'+(s||'?')+'</span>';
+}
+function severityBadge(s) {
+  if(!s) return '';
+  const m={'Critical':'#c92a2a','Major':'#e67700','Minor':'#1971c2','Trivial':'#868e96'};
+  return '<span style="padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;color:#fff;background:'+(m[s]||'#555')+';margin-left:4px">'+s+'</span>';
+}
+
+// ── Show section ───────────────────────────────────────────────────────────
+function showSection(section, status) {
+  currentSection = section;
+  currentStatus  = status;
+  currentPage    = 1;
+
+  // Update stat card highlighting
+  document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+  // Update status bars
+  document.querySelectorAll('.status-bar-row').forEach(r => r.classList.remove('selected'));
+  if(status !== 'all') {
+    document.querySelectorAll('.status-bar-row').forEach(r => {
+      if(r.dataset.status === status) r.classList.add('selected');
+    });
+  }
+
+  // Update filter tag
+  const tag = document.getElementById('activeFilterTag');
+  const lbl = document.getElementById('filterLabel');
+  if(status !== 'all') {
+    tag.style.display='inline-flex';
+    lbl.textContent = status;
+  } else {
+    tag.style.display='none';
+  }
+
+  // Update table title
+  const titles = {
+    active:   status==='all' ? '🔴 Active Bugs (All Time)' : '🔍 Filtered: '+status,
+    reported: '📌 Bugs Reported This Month',
+    resolved: '✅ Resolved/Fixed This Month'
+  };
+  document.getElementById('tableTitle').textContent = titles[section];
+
+  // Clear search
+  document.getElementById('searchInput').value = '';
+  renderTable();
+}
+
+function filterByStatus(status, el) {
+  el.dataset.status = status;
+  showSection('active', status);
+}
+
+function clearStatusFilter() {
+  showSection('active','all');
+}
+
+// ── Get current rows ───────────────────────────────────────────────────────
+function getRows() {
+  let rows = DATA[currentSection] || [];
+  if(currentStatus !== 'all') {
+    rows = rows.filter(r => r.Status === currentStatus);
+  }
+  const q = (document.getElementById('searchInput').value||'').toLowerCase();
+  if(q) rows = rows.filter(r => (r.Name||'').toLowerCase().includes(q));
+  return rows;
+}
+
+// ── Sort ───────────────────────────────────────────────────────────────────
+function sortTable(key) {
+  if(currentSort.key === key) currentSort.dir *= -1;
+  else { currentSort.key = key; currentSort.dir = -1; }
+  currentPage = 1;
+  renderTable();
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderTable() {
+  let rows = getRows();
+
+  // Sort
+  rows = [...rows].sort((a,b) => {
+    const va = a[currentSort.key]||'';
+    const vb = b[currentSort.key]||'';
+    return va < vb ? -currentSort.dir : va > vb ? currentSort.dir : 0;
+  });
+
+  // Count badge
+  document.getElementById('tableCount').textContent = rows.length + ' bugs';
+
+  // Paginate
+  const total = rows.length;
+  const pages = Math.ceil(total / PAGE_SIZE) || 1;
+  if(currentPage > pages) currentPage = pages;
+  const start = (currentPage-1)*PAGE_SIZE;
+  const pageRows = rows.slice(start, start+PAGE_SIZE);
+
+  // Build rows
+  const html = pageRows.map(b => {
+    const name = b.Name || '(no title)';
+    const created = b.Created_Time ? b.Created_Time.split('T')[0] : '';
+    const updated = b.Modified_Time ? b.Modified_Time.split('T')[0] : '';
+    return '<tr><td style="padding:8px 12px;border-bottom:1px solid #f5f5f5">' +
+      '<a href="https://crm.zoho.in/crm/crmlaunchpad/tab/CustomModule2/'+b.id+'" target="_blank" style="color:#1971c2;text-decoration:none;font-weight:600;font-size:12px">'+name+'</a>' +
+      severityBadge(b.Severity) +
+      '</td>' +
+      '<td style="padding:8px 12px;border-bottom:1px solid #f5f5f5">'+statusBadge(b.Status)+'</td>' +
+      '<td style="padding:8px 12px;border-bottom:1px solid #f5f5f5;font-size:11px;color:#888">'+b.Severity+'</td>' +
+      '<td style="padding:8px 12px;border-bottom:1px solid #f5f5f5;font-size:11px;color:#888">'+created+'</td>' +
+      '<td style="padding:8px 12px;border-bottom:1px solid #f5f5f5;font-size:11px;color:#888">'+updated+'</td>' +
+      '</tr>';
+  }).join('');
+
+  document.getElementById('bugTableBody').innerHTML = html || '<tr><td colspan="5" class="empty">No bugs match the current filter</td></tr>';
+
+  // Pagination
+  let pag = '';
+  if(pages > 1) {
+    pag += '<button onclick="goPage('+(currentPage-1)+')" '+(currentPage===1?'disabled':'')+'>‹ Prev</button>';
+    for(let i=1;i<=pages;i++) {
+      if(i===1||i===pages||Math.abs(i-currentPage)<=2) {
+        pag += '<button onclick="goPage('+i+')" class="'+(i===currentPage?'active':'')+'" >'+i+'</button>';
+      } else if(Math.abs(i-currentPage)===3) {
+        pag += '<span>…</span>';
+      }
+    }
+    pag += '<button onclick="goPage('+(currentPage+1)+')" '+(currentPage===pages?'disabled':'')+'>Next ›</button>';
+    pag += '<span style="margin-left:8px">Showing '+(start+1)+'–'+Math.min(start+PAGE_SIZE,total)+' of '+total+'</span>';
+  }
+  document.getElementById('paginationBar').innerHTML = pag;
+}
+
+function goPage(p) { currentPage = p; renderTable(); }
+
+// ── Date filter (fetches new data from server) ─────────────────────────────
+function applyDateFilter() {
+  const from = document.getElementById('dateFrom').value;
+  const to   = document.getElementById('dateTo').value;
+  if(!from || !to) { alert('Please select both dates'); return; }
+  document.getElementById('loadingIndicator').style.display = 'block';
+  const url = BASE_URL+'/detail?userId='+USER_ID+'&userName='+USER_NAME+'&start='+from+'&end='+to;
+  window.location.href = url;
+}
+
+function resetFilters() {
+  clearStatusFilter();
+  document.getElementById('searchInput').value = '';
+  renderTable();
+}
+
+// ── Sync status bar data-status attributes ─────────────────────────────────
+document.querySelectorAll('.status-bar-row').forEach(r => {
+  const lbl = r.querySelector('.status-label');
+  if(lbl) r.dataset.status = lbl.textContent.trim();
+});
+
+// ── Init ───────────────────────────────────────────────────────────────────
+showSection('active','all');
+</script>
 </body>
 </html>`;
 }
@@ -556,19 +847,32 @@ app.get('/detail', async (req, res) => {
 
     if (!userId) return res.status(400).send('Missing ?userId=');
 
-    const now        = new Date();
-    const year       = parseInt(req.query.year  || now.getFullYear(), 10);
-    const monthParam = parseInt(req.query.month || (now.getMonth() + 1), 10);
-    const firstDay   = new Date(year, monthParam - 1, 1);
-    const lastDay    = new Date(year, monthParam, 0);
     const pad = n => String(n).padStart(2, '0');
     const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-    const start     = fmt(firstDay);
-    const end       = fmt(lastDay);
-    const monthName = firstDay.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+    const now = new Date();
+
+    let start, end, monthName;
+
+    // Custom date range takes priority over month/year params
+    if (req.query.start && req.query.end) {
+      start = req.query.start;
+      end   = req.query.end;
+      // Build a readable label from the custom range
+      const s = new Date(start + 'T12:00:00');
+      const e = new Date(end   + 'T12:00:00');
+      monthName = `${s.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'})} – ${e.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'})}`;
+    } else {
+      const year       = parseInt(req.query.year  || now.getFullYear(), 10);
+      const monthParam = parseInt(req.query.month || (now.getMonth() + 1), 10);
+      const firstDay   = new Date(year, monthParam - 1, 1);
+      const lastDay    = new Date(year, monthParam, 0);
+      start     = fmt(firstDay);
+      end       = fmt(lastDay);
+      monthName = firstDay.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+    }
 
     const baseUrl = `${req.protocol}://${req.get('host')}/server/crm-monthly-stats`;
-    console.log(`[WorkStatus] Detail for userId=${userId} (${userName})`);
+    console.log(`[WorkStatus] Detail for userId=${userId} (${userName}) range=${start}..${end}`);
 
     const detail = await fetchUserBugDetail(authHeader, userId, start, end);
 
@@ -577,9 +881,11 @@ app.get('/detail', async (req, res) => {
       return res.json({ userId, userName, month: monthName, period:{start,end}, ...detail });
     }
 
+    const queryParams = { userId, userName, start, end };
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
-    return res.send(buildDetailHTML(userName || userId, monthName, detail, baseUrl));
+    return res.send(buildDetailHTML(userName || userId, monthName, detail, baseUrl, queryParams));
   } catch (err) {
     console.error('[WorkStatus] Detail error:', err);
     return res.status(500).json({ error: err.message });
