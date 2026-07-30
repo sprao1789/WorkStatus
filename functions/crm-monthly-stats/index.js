@@ -328,49 +328,67 @@ function bugRow(bug, linkBase) {
 
 // ─── Build Widget HTML ────────────────────────────────────────────────────────
 function buildWidgetHTML(monthName, teamStats, baseUrl) {
-  const colors = ['#e03131','#2196f3','#2e7d32','#f57c00','#6a1b9a'];
-  const avatarColor = name => { let h=0; for(let i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))%colors.length; return colors[h]; };
+  const PALETTE = ['#4f46e5','#0891b2','#059669','#d97706','#dc2626','#7c3aed'];
+  const avatarColor = name => { let h=0; for(let i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))%PALETTE.length; return PALETTE[h]; };
 
   const cards = teamStats.map(u => {
-    const initials = u.name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
-    const color    = avatarColor(u.name);
-    const bugsTotal = u.bugs_open + u.bugs_in_progress + u.bugs_to_test;
-    const taskPct  = u.tasks_assigned > 0 ? Math.round((u.tasks_completed/u.tasks_assigned)*100) : 0;
+    const initials  = u.name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
+    const color     = avatarColor(u.name);
+    const taskPct   = u.tasks_assigned > 0 ? Math.round((u.tasks_completed/u.tasks_assigned)*100) : 0;
     const detailUrl = `${baseUrl}/detail?userId=${u.user_id}&userName=${encodeURIComponent(u.name)}`;
+    const totalActive = u.bugs_open + u.bugs_in_progress + u.bugs_to_test;
 
-    return `<a href="${detailUrl}" class="card-link">
-    <div class="member-card">
-      <div class="member-header">
-        <div class="avatar" style="background:${color}">${initials}</div>
-        <div class="member-info">
-          <div class="member-name">${u.name}</div>
-          <div class="member-email">${u.email}</div>
+    return `<a href="${detailUrl}" style="text-decoration:none;color:inherit">
+    <div class="card" style="--accent:${color}">
+      <!-- card top accent bar -->
+      <div class="card-bar"></div>
+      <div class="card-body">
+        <!-- header -->
+        <div class="card-head">
+          <div class="avatar">${initials}</div>
+          <div>
+            <div class="uname">${u.name}</div>
+            <div class="uemail">${u.email}</div>
+          </div>
+          <div class="go-btn">View Details <span>→</span></div>
         </div>
-        <div class="view-detail">Details →</div>
-      </div>
 
-      <div class="section-title">🐛 Bugs (Active)</div>
-      <div class="stat-row">
-        <div class="stat-item"><div class="stat-val red">${u.bugs_open}</div><div class="stat-lbl">Open</div></div>
-        <div class="stat-item"><div class="stat-val orange">${u.bugs_in_progress}</div><div class="stat-lbl">In Progress</div></div>
-        <div class="stat-item"><div class="stat-val blue">${u.bugs_to_test}</div><div class="stat-lbl">To Test</div></div>
-        <div class="stat-item"><div class="stat-val green">${u.bugs_fixed}</div><div class="stat-lbl">Fixed</div></div>
-        <div class="stat-item"><div class="stat-val gray">${u.bugs_closed}</div><div class="stat-lbl">Closed</div></div>
-        <div class="stat-item"><div class="stat-val purple">${u.bugs_reported}</div><div class="stat-lbl">Reported★</div></div>
-      </div>
+        <!-- bug section -->
+        <div class="section-label">🐛 Bugs — Active &amp; Status</div>
+        <div class="chips">
+          <div class="chip" style="--c:#e03131"><span>${u.bugs_open}</span>Open</div>
+          <div class="chip" style="--c:#e67700"><span>${u.bugs_in_progress}</span>In Progress</div>
+          <div class="chip" style="--c:#1971c2"><span>${u.bugs_to_test}</span>To Test</div>
+          <div class="chip" style="--c:#2f9e44"><span>${u.bugs_fixed}</span>Fixed</div>
+          <div class="chip" style="--c:#868e96"><span>${u.bugs_closed}</span>Closed</div>
+          <div class="chip" style="--c:#9c36b5"><span>${u.bugs_reported}</span>Reported★</div>
+        </div>
 
-      <div class="section-title">📋 Tasks (This Month)</div>
-      <div class="stat-row">
-        <div class="stat-item"><div class="stat-val">${u.tasks_assigned}</div><div class="stat-lbl">Assigned</div></div>
-        <div class="stat-item"><div class="stat-val green">${u.tasks_completed}</div><div class="stat-lbl">Completed</div></div>
-        <div class="stat-item"><div class="stat-val orange">${u.tasks_open}</div><div class="stat-lbl">Open</div></div>
-      </div>
-      <div class="progress-bar-wrap">
-        <div class="progress-label">Task Completion: ${taskPct}%</div>
-        <div class="progress-bar"><div class="progress-fill" style="width:${taskPct}%;background:${color}"></div></div>
-      </div>
+        <!-- divider -->
+        <div class="divider"></div>
 
-      ${u.error ? `<div class="error-note">⚠️ ${u.error}</div>` : ''}
+        <!-- task section -->
+        <div class="section-label">📋 Tasks — This Month</div>
+        <div class="task-row">
+          <div class="task-box">
+            <div class="task-val">${u.tasks_assigned}</div>
+            <div class="task-lbl">Assigned</div>
+          </div>
+          <div class="task-box">
+            <div class="task-val" style="color:#2f9e44">${u.tasks_completed}</div>
+            <div class="task-lbl">Done</div>
+          </div>
+          <div class="task-box">
+            <div class="task-val" style="color:#e67700">${u.tasks_open}</div>
+            <div class="task-lbl">Open</div>
+          </div>
+          <div class="prog-wrap">
+            <div class="prog-label">Completion ${taskPct}%</div>
+            <div class="prog-track"><div class="prog-fill" style="width:${taskPct}%;background:var(--accent)"></div></div>
+          </div>
+        </div>
+        ${u.error ? `<div class="err-note">⚠️ ${u.error}</div>` : ''}
+      </div>
     </div></a>`;
   }).join('');
 
@@ -382,54 +400,87 @@ function buildWidgetHTML(monthName, teamStats, baseUrl) {
 <title>WorkStatus — ${monthName}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f8;color:#222;padding:16px}
-  .page-header{background:linear-gradient(135deg,#e03131,#9b2226);color:#fff;border-radius:14px;padding:20px 28px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
-  .page-header h1{font-size:22px;font-weight:800}
-  .page-header p{font-size:13px;opacity:.85;margin-top:3px}
-  .header-note{font-size:11px;opacity:.7;background:rgba(255,255,255,.15);padding:4px 10px;border-radius:8px}
-  .team-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
-  .card-link{text-decoration:none;color:inherit}
-  .member-card{background:#fff;border-radius:14px;padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.07);transition:transform .15s,box-shadow .15s;cursor:pointer}
-  .member-card:hover{transform:translateY(-2px);box-shadow:0 6px 24px rgba(0,0,0,.12)}
-  .member-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #f0f0f0}
-  .avatar{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:15px;flex-shrink:0}
-  .member-name{font-weight:700;font-size:15px;color:#1a1a2e}
-  .member-email{font-size:11px;color:#999;margin-top:2px}
-  .view-detail{margin-left:auto;font-size:11px;color:#1971c2;font-weight:700;white-space:nowrap}
-  .section-title{font-size:11px;font-weight:700;color:#888;text-transform:uppercase;margin:10px 0 6px;letter-spacing:.5px}
-  .stat-row{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-bottom:8px}
-  .stat-item{background:#f8f9fd;border-radius:8px;padding:8px 4px;text-align:center}
-  .stat-val{font-size:18px;font-weight:800;color:#333;line-height:1}
-  .stat-val.red{color:#e03131}
-  .stat-val.orange{color:#e67700}
-  .stat-val.blue{color:#1971c2}
-  .stat-val.green{color:#2e7d32}
-  .stat-val.gray{color:#868e96}
-  .stat-val.purple{color:#9c36b5}
-  .stat-lbl{font-size:9px;color:#aaa;text-transform:uppercase;margin-top:2px;font-weight:600}
-  .progress-bar-wrap{margin-top:4px}
-  .progress-label{font-size:11px;color:#888;margin-bottom:4px}
-  .progress-bar{background:#f0f0f0;border-radius:20px;height:6px;overflow:hidden}
-  .progress-fill{height:100%;border-radius:20px}
-  .error-note{font-size:11px;color:#e03131;margin-top:8px;padding:6px;background:#fff5f5;border-radius:6px}
-  .footer{text-align:center;margin-top:20px;font-size:12px;color:#aaa}
-  .footer a{color:#e03131;text-decoration:none;font-weight:600;margin-left:8px}
-  @media(max-width:480px){.stat-row{grid-template-columns:repeat(3,1fr)}}
+  :root{--bg:#0f172a;--surface:#1e293b;--border:#334155;--text:#e2e8f0;--muted:#94a3b8;--radius:16px}
+  html,body{min-height:100%;font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+  body{padding:0}
+
+  /* ── TOP HERO ── */
+  .hero{background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);border-bottom:1px solid var(--border);padding:28px 32px 24px}
+  .hero-inner{max-width:1400px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+  .hero-title{font-size:24px;font-weight:800;letter-spacing:-.5px;background:linear-gradient(90deg,#818cf8,#38bdf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .hero-sub{font-size:13px;color:var(--muted);margin-top:4px}
+  .hero-badge{background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.3);color:#818cf8;font-size:11px;font-weight:700;padding:5px 14px;border-radius:20px}
+  .hero-actions{display:flex;gap:8px;align-items:center}
+  .btn-ghost{background:rgba(255,255,255,.06);border:1px solid var(--border);color:var(--muted);font-size:12px;font-weight:600;padding:7px 16px;border-radius:10px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px;transition:background .15s}
+  .btn-ghost:hover{background:rgba(255,255,255,.1)}
+
+  /* ── GRID ── */
+  .grid-wrap{max-width:1400px;margin:0 auto;padding:24px 32px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:20px}
+
+  /* ── CARD ── */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:transform .15s,box-shadow .2s;cursor:pointer}
+  .card:hover{transform:translateY(-3px);box-shadow:0 12px 40px rgba(0,0,0,.5);border-color:var(--accent)}
+  .card-bar{height:4px;background:var(--accent)}
+  .card-body{padding:20px}
+  .card-head{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+  .avatar{width:46px;height:46px;border-radius:12px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:16px;flex-shrink:0;letter-spacing:0}
+  .uname{font-size:15px;font-weight:700;color:#f1f5f9}
+  .uemail{font-size:11px;color:var(--muted);margin-top:2px}
+  .go-btn{margin-left:auto;font-size:11px;font-weight:700;color:#818cf8;white-space:nowrap;display:flex;align-items:center;gap:4px;opacity:.8}
+  .go-btn span{transition:transform .15s}
+  .card:hover .go-btn span{transform:translateX(4px)}
+  .section-label{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px}
+  .divider{border:none;border-top:1px solid var(--border);margin:16px 0}
+
+  /* ── BUG CHIPS ── */
+  .chips{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:4px}
+  .chip{background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:10px;padding:10px 8px;text-align:center;transition:background .12s;font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.5px}
+  .chip:hover{background:rgba(255,255,255,.08)}
+  .chip span{display:block;font-size:22px;font-weight:800;color:var(--c);line-height:1;margin-bottom:4px}
+
+  /* ── TASK ROW ── */
+  .task-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .task-box{text-align:center;min-width:48px}
+  .task-val{font-size:22px;font-weight:800;color:#f1f5f9;line-height:1}
+  .task-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:2px}
+  .prog-wrap{flex:1;min-width:120px}
+  .prog-label{font-size:10px;color:var(--muted);margin-bottom:5px}
+  .prog-track{background:rgba(255,255,255,.08);border-radius:20px;height:5px;overflow:hidden}
+  .prog-fill{height:100%;border-radius:20px;transition:width .5s ease}
+  .err-note{font-size:11px;color:#f87171;margin-top:10px;padding:6px 10px;background:rgba(220,38,38,.1);border:1px solid rgba(220,38,38,.2);border-radius:8px}
+
+  /* ── FOOTER ── */
+  .footer{max-width:1400px;margin:0 auto;padding:16px 32px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--muted)}
+  .footer a{color:#818cf8;text-decoration:none;font-weight:600;margin-left:12px}
+  @media(max-width:600px){.grid-wrap{padding:16px}.hero{padding:20px 16px}.chips{grid-template-columns:repeat(3,1fr)}}
 </style>
 </head>
 <body>
-<div class="page-header">
-  <div>
-    <h1>📊 WorkStatus — Team CRM Dashboard</h1>
-    <p>${monthName} &nbsp;·&nbsp; Click a card to see full bug details</p>
+<div class="hero">
+  <div class="hero-inner">
+    <div>
+      <div class="hero-title">WorkStatus Dashboard</div>
+      <div class="hero-sub">📅 ${monthName} &nbsp;·&nbsp; CRM Team Stats · Click any card for bug details</div>
+    </div>
+    <div class="hero-actions">
+      <div class="hero-badge">★ = Bugs filed this month</div>
+      <a href="javascript:location.reload()" class="btn-ghost">🔄 Refresh</a>
+      <a href="https://crm.zoho.in/crm/crmlaunchpad/tab/CustomModule2" target="_blank" class="btn-ghost">🐛 CRM Bugs</a>
+    </div>
   </div>
-  <div class="header-note">★ Reported = bugs filed this month</div>
 </div>
-<div class="team-grid">${cards}</div>
+
+<div class="grid-wrap">
+  <div class="grid">${cards}</div>
+</div>
+
 <div class="footer">
-  Updated: ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})} IST
-  <a href="javascript:location.reload()">🔄 Refresh</a>
-  <a href="https://crm.zoho.in/crm/crmlaunchpad/tab/CustomModule2" target="_blank">🐛 Open Bugs</a>
+  <span>Updated: ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})} IST</span>
+  <div>
+    <a href="javascript:location.reload()">🔄 Refresh</a>
+    <a href="https://crm.zoho.in/crm/crmlaunchpad/tab/CustomModule2" target="_blank">🐛 Open Bugs in CRM</a>
+  </div>
 </div>
 </body>
 </html>`;
