@@ -1,0 +1,13 @@
+{
+  "name": "crm-monthly-stats",
+  "version": "1.0.0",
+  "description": "WorkStatus — Fetches Zoho CRM monthly stats using Catalyst Connection",
+  "main": "index.js",
+  "dependencies": {
+    "express": "^4.18.2",
+    "zcatalyst-sdk-node": "*"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "targets": [
+      "crm-monthly-stats"
+    ],
+    "source": "functions"
+  }
+}
