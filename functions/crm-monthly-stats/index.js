@@ -1227,6 +1227,31 @@ app.get('/debug/modules', async (req, res) => {
   } catch(err) { return res.status(500).json({error:err.message}); }
 });
 
+// Discover fields for any module using CRM settings/fields API
+// Example: /debug/fields?module=QA_Audit_Automation
+app.get('/debug/fields', async (req, res) => {
+  try {
+    const app_cat = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
+    const moduleApiName = req.query.module;
+    if (!moduleApiName) return res.status(400).json({ error: 'Missing ?module=API_NAME' });
+
+    const raw = await crmGet(authHeader, `/crm/v3/settings/fields?module=${encodeURIComponent(moduleApiName)}`);
+    const fields = (raw.fields || []).map(f => ({
+      api_name: f.api_name,
+      field_label: f.field_label,
+      data_type: f.data_type,
+      visible: f.visible,
+      read_only: f.read_only,
+      required: f.system_mandatory || false
+    }));
+
+    return res.json({ module: moduleApiName, count: fields.length, fields });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/debug/coql', async (req, res) => {
   try {
     const app_cat = catalyst.initialize(req);
