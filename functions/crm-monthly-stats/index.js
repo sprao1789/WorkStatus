@@ -1,30 +1,37 @@
 /**
- * WorkStatus — CRM Monthly Stats
+ * WorkStatus — CRM Monthly Stats (Per-User Team Dashboard)
  * Catalyst Advanced IO Function using Express.js (Node.js 18)
  *
  * Uses Catalyst Connection "zoho_crm_connection" (OAuth, configured in Catalyst console).
  * No hardcoded tokens.
  *
- * Routes:
- *   GET /server/crm-monthly-stats/              → JSON stats
- *   GET /server/crm-monthly-stats/widget        → HTML widget (for Cliq iframe / browser)
- *   GET /server/crm-monthly-stats/healthz       → { ok: true }
+ * Team members tracked:
+ *   - paparao.s@zohocorp.com
+ *   - muthu.p@zohocorp.com
+ *   - naveenkarthick.s@zohocorp.com
+ *   - vishwa.sr@zohocorp.com
+ *   - harish.subramanian@zohocorp.com
  *
- * Optional query params:
- *   ?year=2026&month=7      → fetch stats for a specific month (month is 1-based)
- *   ?format=html            → same as /widget route
+ * Routes:
+ *   GET /server/crm-monthly-stats/          → JSON stats
+ *   GET /server/crm-monthly-stats/widget    → HTML widget
+ *   GET /server/crm-monthly-stats/healthz   → { ok: true }
+ *
+ * Required Catalyst Connection scopes:
+ *   ZohoCRM.modules.ALL, ZohoCRM.settings.ALL,
+ *   ZohoCRM.users.ALL, ZohoCRM.org.ALL,
+ *   ZohoCRM.bulk.ALL, ZohoCRM.coql.READ
  */
 
 'use strict';
 
-const express   = require('express');
-const catalyst  = require('zcatalyst-sdk-node');
+const express  = require('express');
+const catalyst = require('zcatalyst-sdk-node');
 
 const app = express();
 app.use(express.json());
 
-// Catalyst passes the full path e.g. /server/crm-monthly-stats/widget
-// Strip the /server/<function-name> prefix so routes below use clean paths like /widget
+// Strip /server/crm-monthly-stats prefix so Express routes use clean paths
 app.use((req, _res, next) => {
   const prefix = '/server/crm-monthly-stats';
   if (req.url.startsWith(prefix)) {
@@ -33,10 +40,19 @@ app.use((req, _res, next) => {
   next();
 });
 
+// ─── Team Members ─────────────────────────────────────────────────────────────
+
+const TEAM = [
+  { email: 'paparao.s@zohocorp.com',        name: 'Paparao S' },
+  { email: 'muthu.p@zohocorp.com',           name: 'Muthu P' },
+  { email: 'naveenkarthick.s@zohocorp.com',  name: 'Naveenkarthick S' },
+  { email: 'vishwa.sr@zohocorp.com',         name: 'Vishwa SR' },
+  { email: 'harish.subramanian@zohocorp.com',name: 'Harish Subramanian' }
+];
+
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
 function getMonthRange(year, month) {
-  // month is 0-based (JS Date convention)
   const firstDay = new Date(year, month, 1);
   const lastDay  = new Date(year, month + 1, 0);
   const pad = n => String(n).padStart(2, '0');
@@ -50,7 +66,7 @@ function getMonthRange(year, month) {
 
 // ─── CRM helpers ──────────────────────────────────────────────────────────────
 
-async function coqlCount(connection, query) {
+async function coqlQuery(connection, query) {
   try {
     const resp = await connection.post(
       'https://www.zohoapis.in/crm/v3/coql',
@@ -58,81 +74,220 @@ async function coqlCount(connection, query) {
       { 'Content-Type': 'application/json' }
     );
     const body = JSON.parse(resp.getBody());
-    return (body.data && body.data[0]) ? (body.data[0].count || 0) : 0;
+    return body.data || [];
   } catch (e) {
-    console.error('COQL error:', e.message);
-    return 0;
-  }
-}
-
-async function getTopOpenDeals(connection) {
-  try {
-    const url = 'https://www.zohoapis.in/crm/v3/Deals' +
-      '?fields=Deal_Name,Stage,Amount,Account_Name,Closing_Date' +
-      '&criteria=(Stage:not_equal_to:Closed Won;and:Stage:not_equal_to:Closed Lost)' +
-      '&sort_by=Amount&sort_order=desc&per_page=5';
-    const resp = await connection.get(url);
-    const body = JSON.parse(resp.getBody());
-    return (body.data || []).map(d => ({
-      name:    d.Deal_Name || 'Unnamed',
-      stage:   d.Stage || 'Unknown',
-      amount:  d.Amount || 0,
-      account: d.Account_Name ? d.Account_Name.name : 'N/A',
-      closing: d.Closing_Date || '—'
-    }));
-  } catch (e) {
-    console.error('Top deals error:', e.message);
+    console.error('COQL error:', query.substring(0, 80), e.message);
     return [];
   }
 }
 
-async function fetchStats(connection, start, end) {
+async function coqlCount(connection, query) {
+  const rows = await coqlQuery(connection, query);
+  return (rows.length > 0 && rows[0].count !== undefined) ? rows[0].count : 0;
+}
+
+// Fetch Zoho CRM user ID by email
+async function getUserId(connection, email) {
+  try {
+    const resp = await connection.get(
+      `https://www.zohoapis.in/crm/v3/users?type=ActiveUsers`
+    );
+    const body = JSON.parse(resp.getBody());
+    const users = body.users || [];
+    const match = users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
+    return match ? match.id : null;
+  } catch (e) {
+    console.error(`getUserId error for ${email}:`, e.message);
+    return null;
+  }
+}
+
+// ─── Per-User Stats ────────────────────────────────────────────────────────────
+
+async function fetchUserStats(connection, user, userId, start, end) {
+  if (!userId) {
+    return {
+      email: user.email,
+      name:  user.name,
+      user_id: null,
+      error: 'User not found in CRM',
+      tasks_assigned:  0,
+      tasks_completed: 0,
+      tasks_open:      0,
+      bugs_open:       0,
+      bugs_closed:     0,
+      bugs_assigned_by_user: 0,
+      deals_owned:     0,
+      deals_won:       0,
+      calls_made:      0
+    };
+  }
+
   const tz   = '+05:30';
   const from = `${start}T00:00:00${tz}`;
   const to   = `${end}T23:59:59${tz}`;
 
+  // Tasks — assigned TO this user this month
+  const tasksAssignedQ = `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
+  // Tasks — completed BY this user this month
+  const tasksCompletedQ = `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`;
+  // Tasks — open (assigned, not yet done)
+  const tasksOpenQ = `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status != 'Completed'`;
+
+  // Bugs (using Cases module in CRM — covers bug reports / issues)
+  // Open bugs assigned to this user
+  const bugsOpenQ = `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status != 'Closed'`;
+  // Closed bugs this month by this user
+  const bugsClosedQ = `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status = 'Closed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`;
+  // Bugs reported/created by this user (Created_By)
+  const bugsAssignedByQ = `SELECT count(id) as count FROM Cases WHERE Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
+
+  // Deals owned by this user this month
+  const dealsOwnedQ = `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
+  // Deals won by this user this month
+  const dealsWonQ = `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`;
+  // Calls made by this user this month
+  const callsMadeQ = `SELECT count(id) as count FROM Calls WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
+
   const [
-    dealsCreated, dealsWon, dealsLost,
-    contacts, leads,
-    tasks, calls,
-    topDeals
+    tasksAssigned, tasksCompleted, tasksOpen,
+    bugsOpen, bugsClosed, bugsAssignedBy,
+    dealsOwned, dealsWon, callsMade
   ] = await Promise.all([
-    coqlCount(connection, `SELECT count(id) as count FROM Deals WHERE Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(connection, `SELECT count(id) as count FROM Deals WHERE Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`),
-    coqlCount(connection, `SELECT count(id) as count FROM Deals WHERE Stage = 'Closed Lost' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`),
-    coqlCount(connection, `SELECT count(id) as count FROM Contacts WHERE Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(connection, `SELECT count(id) as count FROM Leads WHERE Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(connection, `SELECT count(id) as count FROM Tasks WHERE Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
-    coqlCount(connection, `SELECT count(id) as count FROM Calls WHERE Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    getTopOpenDeals(connection)
+    coqlCount(connection, tasksAssignedQ),
+    coqlCount(connection, tasksCompletedQ),
+    coqlCount(connection, tasksOpenQ),
+    coqlCount(connection, bugsOpenQ),
+    coqlCount(connection, bugsClosedQ),
+    coqlCount(connection, bugsAssignedByQ),
+    coqlCount(connection, dealsOwnedQ),
+    coqlCount(connection, dealsWonQ),
+    coqlCount(connection, callsMadeQ)
   ]);
 
-  const totalClosed = dealsWon + dealsLost;
   return {
-    deals_created:   dealsCreated,
-    deals_won:       dealsWon,
-    deals_lost:      dealsLost,
-    win_rate:        totalClosed > 0 ? Math.round((dealsWon / totalClosed) * 100) : 0,
-    contacts_added:  contacts,
-    leads_added:     leads,
-    tasks_completed: tasks,
-    calls_made:      calls,
-    top_open_deals:  topDeals
+    email:   user.email,
+    name:    user.name,
+    user_id: userId,
+    tasks_assigned:        tasksAssigned,
+    tasks_completed:       tasksCompleted,
+    tasks_open:            tasksOpen,
+    bugs_open:             bugsOpen,
+    bugs_closed:           bugsClosed,
+    bugs_assigned_by_user: bugsAssignedBy,
+    deals_owned:           dealsOwned,
+    deals_won:             dealsWon,
+    calls_made:            callsMade
   };
 }
 
-// ─── HTML Widget Template ──────────────────────────────────────────────────────
+// ─── HTML Widget ───────────────────────────────────────────────────────────────
 
-function buildWidgetHTML(monthName, stats) {
-  const fmt      = n => Number(n).toLocaleString('en-IN');
-  const dealRows = stats.top_open_deals.map(d => `
-    <tr>
-      <td>${d.name}</td>
-      <td><span class="badge">${d.stage}</span></td>
-      <td>${d.account}</td>
-      <td class="amount">₹${fmt(d.amount)}</td>
-      <td>${d.closing}</td>
-    </tr>`).join('');
+function buildWidgetHTML(monthName, teamStats) {
+  const avatarColor = (name) => {
+    const colors = ['#e03131','#2196f3','#2e7d32','#f57c00','#6a1b9a'];
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % colors.length;
+    return colors[h];
+  };
+
+  const memberCards = teamStats.map(u => {
+    const initials = u.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0,2);
+    const color    = avatarColor(u.name);
+    const taskPct  = u.tasks_assigned > 0
+      ? Math.round((u.tasks_completed / u.tasks_assigned) * 100) : 0;
+
+    return `
+    <div class="member-card">
+      <div class="member-header">
+        <div class="avatar" style="background:${color}">${initials}</div>
+        <div class="member-info">
+          <div class="member-name">${u.name}</div>
+          <div class="member-email">${u.email}</div>
+        </div>
+      </div>
+
+      <div class="stat-row">
+        <div class="stat-item">
+          <span class="stat-icon">📋</span>
+          <div>
+            <div class="stat-val">${u.tasks_assigned}</div>
+            <div class="stat-lbl">Assigned Tasks</div>
+          </div>
+        </div>
+        <div class="stat-item">
+          <span class="stat-icon">✅</span>
+          <div>
+            <div class="stat-val">${u.tasks_completed}</div>
+            <div class="stat-lbl">Completed</div>
+          </div>
+        </div>
+        <div class="stat-item">
+          <span class="stat-icon">⏳</span>
+          <div>
+            <div class="stat-val">${u.tasks_open}</div>
+            <div class="stat-lbl">Open Tasks</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="progress-bar-wrap">
+        <div class="progress-label">Task Completion: ${taskPct}%</div>
+        <div class="progress-bar">
+          <div class="progress-fill" style="width:${taskPct}%;background:${color}"></div>
+        </div>
+      </div>
+
+      <div class="stat-row">
+        <div class="stat-item bug">
+          <span class="stat-icon">🐛</span>
+          <div>
+            <div class="stat-val red">${u.bugs_open}</div>
+            <div class="stat-lbl">Open Bugs</div>
+          </div>
+        </div>
+        <div class="stat-item bug">
+          <span class="stat-icon">🔒</span>
+          <div>
+            <div class="stat-val green">${u.bugs_closed}</div>
+            <div class="stat-lbl">Closed Bugs</div>
+          </div>
+        </div>
+        <div class="stat-item bug">
+          <span class="stat-icon">📌</span>
+          <div>
+            <div class="stat-val">${u.bugs_assigned_by_user}</div>
+            <div class="stat-lbl">Reported</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stat-row">
+        <div class="stat-item">
+          <span class="stat-icon">🎯</span>
+          <div>
+            <div class="stat-val">${u.deals_owned}</div>
+            <div class="stat-lbl">Deals Owned</div>
+          </div>
+        </div>
+        <div class="stat-item">
+          <span class="stat-icon">🏆</span>
+          <div>
+            <div class="stat-val green">${u.deals_won}</div>
+            <div class="stat-lbl">Deals Won</div>
+          </div>
+        </div>
+        <div class="stat-item">
+          <span class="stat-icon">📞</span>
+          <div>
+            <div class="stat-val">${u.calls_made}</div>
+            <div class="stat-lbl">Calls Made</div>
+          </div>
+        </div>
+      </div>
+      ${u.error ? `<div class="error-note">⚠️ ${u.error}</div>` : ''}
+    </div>`;
+  }).join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -142,72 +297,45 @@ function buildWidgetHTML(monthName, stats) {
 <title>WorkStatus — ${monthName}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f4f6fb;color:#222}
-  .card{background:#fff;border-radius:14px;box-shadow:0 4px 24px rgba(0,0,0,.09);max-width:800px;margin:24px auto;overflow:hidden}
-  .header{background:linear-gradient(135deg,#e03131,#9b2226);color:#fff;padding:22px 28px}
-  .header h1{font-size:20px;font-weight:700}
-  .header p{font-size:13px;opacity:.82;margin-top:3px}
-  .section{padding:20px 28px;border-bottom:1px solid #f0f0f0}
-  .section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#888;margin-bottom:14px}
-  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-  .stat{background:#f8f9fd;border:1px solid #e8eaf2;border-radius:10px;padding:16px 10px;text-align:center}
-  .stat .icon{font-size:20px}
-  .stat .val{font-size:28px;font-weight:800;color:#e03131;margin:4px 0 2px}
-  .stat .lbl{font-size:10px;color:#999;font-weight:600;text-transform:uppercase}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{background:#f4f5f9;padding:9px 12px;text-align:left;font-size:11px;font-weight:600;color:#777;text-transform:uppercase}
-  td{padding:10px 12px;border-bottom:1px solid #f2f2f2;color:#333}
-  tr:last-child td{border-bottom:none}
-  tr:hover td{background:#fafbff}
-  .badge{background:#e8f0fe;color:#1a56db;border-radius:20px;padding:2px 9px;font-size:11px;font-weight:600;white-space:nowrap}
-  .amount{font-weight:700;color:#1a7c3e}
-  .footer{padding:14px 28px;background:#fafbfc;display:flex;justify-content:space-between;align-items:center}
-  .footer span{font-size:12px;color:#bbb}
-  .btn{padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;border:none;cursor:pointer;text-decoration:none;display:inline-block}
-  .btn-primary{background:#e03131;color:#fff;margin-left:8px}
-  .btn-secondary{background:#f0f2f8;color:#333}
-  @media(max-width:600px){.grid{grid-template-columns:repeat(2,1fr)}}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f8;color:#222;padding:16px}
+  .page-header{background:linear-gradient(135deg,#e03131,#9b2226);color:#fff;border-radius:14px;padding:20px 28px;margin-bottom:20px}
+  .page-header h1{font-size:20px;font-weight:700}
+  .page-header p{font-size:13px;opacity:.82;margin-top:3px}
+  .team-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+  .member-card{background:#fff;border-radius:14px;padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.07)}
+  .member-header{display:flex;align-items:center;gap:14px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid #f0f0f0}
+  .avatar{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:16px;flex-shrink:0}
+  .member-name{font-weight:700;font-size:15px;color:#1a1a2e}
+  .member-email{font-size:11px;color:#999;margin-top:2px}
+  .stat-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+  .stat-item{background:#f8f9fd;border-radius:8px;padding:10px 8px;display:flex;align-items:center;gap:8px}
+  .stat-icon{font-size:18px;flex-shrink:0}
+  .stat-val{font-size:20px;font-weight:800;color:#333;line-height:1}
+  .stat-val.red{color:#e03131}
+  .stat-val.green{color:#2e7d32}
+  .stat-lbl{font-size:10px;color:#999;text-transform:uppercase;margin-top:2px;font-weight:600}
+  .progress-bar-wrap{margin-bottom:10px}
+  .progress-label{font-size:11px;color:#888;margin-bottom:4px}
+  .progress-bar{background:#f0f0f0;border-radius:20px;height:8px;overflow:hidden}
+  .progress-fill{height:100%;border-radius:20px;transition:width .3s}
+  .error-note{font-size:11px;color:#e03131;margin-top:8px;padding:6px;background:#fff5f5;border-radius:6px}
+  .footer{text-align:center;margin-top:20px;font-size:12px;color:#aaa}
+  .footer a{color:#e03131;text-decoration:none;font-weight:600;margin-left:8px}
+  @media(max-width:480px){.stat-row{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="header">
-    <h1>📊 WorkStatus — Monthly CRM Stats</h1>
-    <p>${monthName} &nbsp;·&nbsp; CRM Performance Overview</p>
-  </div>
-  <div class="section">
-    <div class="section-title">📈 Deals Summary</div>
-    <div class="grid">
-      <div class="stat"><div class="icon">🎯</div><div class="val">${stats.deals_created}</div><div class="lbl">Created</div></div>
-      <div class="stat"><div class="icon">🏆</div><div class="val">${stats.deals_won}</div><div class="lbl">Won</div></div>
-      <div class="stat"><div class="icon">❌</div><div class="val">${stats.deals_lost}</div><div class="lbl">Lost</div></div>
-      <div class="stat"><div class="icon">📊</div><div class="val">${stats.win_rate}%</div><div class="lbl">Win Rate</div></div>
-    </div>
-  </div>
-  <div class="section">
-    <div class="section-title">👥 Pipeline Activity</div>
-    <div class="grid">
-      <div class="stat"><div class="icon">🙋</div><div class="val">${stats.contacts_added}</div><div class="lbl">Contacts</div></div>
-      <div class="stat"><div class="icon">💡</div><div class="val">${stats.leads_added}</div><div class="lbl">Leads</div></div>
-      <div class="stat"><div class="icon">✅</div><div class="val">${stats.tasks_completed}</div><div class="lbl">Tasks Done</div></div>
-      <div class="stat"><div class="icon">📞</div><div class="val">${stats.calls_made}</div><div class="lbl">Calls</div></div>
-    </div>
-  </div>
-  <div class="section">
-    <div class="section-title">💼 Top Open Deals</div>
-    ${stats.top_open_deals.length > 0 ? `
-    <table>
-      <thead><tr><th>Deal Name</th><th>Stage</th><th>Account</th><th>Amount</th><th>Closing</th></tr></thead>
-      <tbody>${dealRows}</tbody>
-    </table>` : '<p style="color:#aaa;font-size:13px">No open deals found.</p>'}
-  </div>
-  <div class="footer">
-    <span>Updated: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST</span>
-    <div>
-      <a href="javascript:location.reload()" class="btn btn-secondary">🔄 Refresh</a>
-      <a href="https://crm.zoho.in/crm/crmlaunchpad/tab/Home/begin" target="_blank" class="btn btn-primary">🌐 Open CRM</a>
-    </div>
-  </div>
+<div class="page-header">
+  <h1>📊 WorkStatus — Team CRM Dashboard</h1>
+  <p>${monthName} &nbsp;·&nbsp; Per-Member Stats: Tasks · Bugs · Deals · Calls</p>
+</div>
+<div class="team-grid">
+  ${memberCards}
+</div>
+<div class="footer">
+  Updated: ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})} IST
+  <a href="javascript:location.reload()">🔄 Refresh</a>
+  <a href="https://crm.zoho.in/crm/crmlaunchpad/tab/Home/begin" target="_blank">🌐 Open CRM</a>
 </div>
 </body>
 </html>`;
@@ -215,48 +343,55 @@ function buildWidgetHTML(monthName, stats) {
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-// Health check
 app.get('/healthz', (req, res) => {
-  res.json({ ok: true, service: 'WorkStatus CRM Stats', ts: new Date().toISOString() });
+  res.json({ ok: true, service: 'WorkStatus Team Dashboard', ts: new Date().toISOString() });
 });
 
-// Main stats handler (JSON + HTML)
 app.get(['/', '/widget'], async (req, res) => {
   try {
     const app_cat = catalyst.initialize(req);
+    const connection = app_cat.connection('zoho_crm_connection');
 
     const now        = new Date();
     const year       = parseInt(req.query.year  || now.getFullYear(), 10);
     const monthParam = parseInt(req.query.month || (now.getMonth() + 1), 10);
-    const { start, end, monthName } = getMonthRange(year, monthParam - 1);
+    const { start, end, monthName } = (() => {
+      const firstDay = new Date(year, monthParam - 1, 1);
+      const lastDay  = new Date(year, monthParam, 0);
+      const pad = n => String(n).padStart(2, '0');
+      const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      return {
+        start:     fmt(firstDay),
+        end:       fmt(lastDay),
+        monthName: firstDay.toLocaleString('en-IN', { month: 'long', year: 'numeric' })
+      };
+    })();
 
     const wantHTML = req.query.format === 'html' || req.path.endsWith('/widget');
 
-    // Get the Catalyst Connection
-    // Connection name: zoho_crm_connection
-    // Required scopes (set these in Catalyst Console → Connections → zoho_crm_connection):
-    //   ZohoCRM.modules.ALL
-    //   ZohoCRM.settings.ALL
-    //   ZohoCRM.users.ALL
-    //   ZohoCRM.org.ALL
-    //   ZohoCRM.bulk.ALL
-    //   ZohoCRM.coql.READ
-    const connection = app_cat.connection('zoho_crm_connection');
+    console.log(`[WorkStatus] Fetching team stats for ${monthName}`);
 
-    console.log(`[WorkStatus] Fetching stats for ${monthName} (${start} → ${end})`);
-    const stats = await fetchStats(connection, start, end);
+    // Step 1: Resolve user IDs for all team members in parallel
+    const userIds = await Promise.all(
+      TEAM.map(u => getUserId(connection, u.email))
+    );
+
+    // Step 2: Fetch per-user stats in parallel
+    const teamStats = await Promise.all(
+      TEAM.map((u, i) => fetchUserStats(connection, u, userIds[i], start, end))
+    );
 
     if (wantHTML) {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store, max-age=0');
-      return res.send(buildWidgetHTML(monthName, stats));
+      return res.send(buildWidgetHTML(monthName, teamStats));
     }
 
     res.setHeader('Cache-Control', 'no-store, max-age=0');
     return res.json({
-      month:        monthName,
-      period:       { start, end },
-      summary:      stats,
+      month:     monthName,
+      period:    { start, end },
+      team:      teamStats,
       generated_at: new Date().toISOString()
     });
 
@@ -266,5 +401,4 @@ app.get(['/', '/widget'], async (req, res) => {
   }
 });
 
-// ─── Export for Catalyst ───────────────────────────────────────────────────────
 module.exports = app;
