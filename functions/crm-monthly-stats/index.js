@@ -48,15 +48,16 @@ const TEAM = [
   { email: 'harish.subramanian@zohocorp.com', name: 'Harish Subramanian' }
 ];
 
-// ─── HTTP helper using Node https + Bearer token ───────────────────────────────
+// ─── HTTP helpers using Node https ────────────────────────────────────────────
+// authHeader = the full Authorization header value e.g. "Zoho-oauthtoken 1000.xxx..."
 
-function crmGet(token, path) {
+function crmGet(authHeader, path) {
   return new Promise((resolve, reject) => {
     const options = {
       hostname: 'www.zohoapis.in',
-      path:     path,
+      path,
       method:   'GET',
-      headers:  { 'Authorization': `Zoho-oauthtoken ${token}` }
+      headers:  { 'Authorization': authHeader }
     };
     const req = https.request(options, (res) => {
       let data = '';
@@ -71,16 +72,16 @@ function crmGet(token, path) {
   });
 }
 
-function crmPost(token, path, body) {
+function crmPost(authHeader, path, body) {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify(body);
     const options = {
       hostname: 'www.zohoapis.in',
-      path:     path,
+      path,
       method:   'POST',
       headers:  {
-        'Authorization': `Zoho-oauthtoken ${token}`,
-        'Content-Type':  'application/json',
+        'Authorization':  authHeader,
+        'Content-Type':   'application/json',
         'Content-Length': Buffer.byteLength(postData)
       }
     };
@@ -98,20 +99,23 @@ function crmPost(token, path, body) {
   });
 }
 
-// ─── Get access token from Catalyst connection ─────────────────────────────────
-// Uses the Catalyst built-in Connections service (app.connections().getConnectionCredentials)
-// which returns { access_token, token_type, expiry_time_in_seconds }
+// ─── Get auth header from Catalyst connection ─────────────────────────────────
+// getConnectionCredentials returns:
+//   { headers: { Authorization: "Zoho-oauthtoken 1000.xxxx..." }, parameters: {} }
+// We extract the Authorization header value and pass it directly to CRM API calls.
 
-async function getToken(catalystApp) {
+async function getAuthHeader(catalystApp) {
   const creds = await catalystApp.connections().getConnectionCredentials('zoho_crm_connection');
-  return creds.access_token;
+  const authHeader = (creds.headers || {}).Authorization || (creds.headers || {}).authorization;
+  if (!authHeader) throw new Error('No Authorization header in connection credentials');
+  return authHeader;
 }
 
 // ─── CRM helpers ──────────────────────────────────────────────────────────────
 
-async function coqlCount(token, query) {
+async function coqlCount(authHeader, query) {
   try {
-    const body = await crmPost(token, '/crm/v3/coql', { select_query: query });
+    const body = await crmPost(authHeader, '/crm/v3/coql', { select_query: query });
     return (body.data && body.data[0] && body.data[0].count !== undefined)
       ? body.data[0].count : 0;
   } catch (e) {
@@ -120,13 +124,11 @@ async function coqlCount(token, query) {
   }
 }
 
-async function getAllUsers(token) {
-  // Try multiple user types to find what works with this org
+async function getAllUsers(authHeader) {
   const types = ['AllUsers', 'ActiveUsers', 'AdminUsers'];
   for (const type of types) {
     try {
-      const body = await crmGet(token, `/crm/v3/users?type=${type}&per_page=200`);
-      console.log(`[getUserType=${type}] status=${body.status_code} count=${(body.users||[]).length} info=${JSON.stringify(body.info||{})}`);
+      const body = await crmGet(authHeader, `/crm/v3/users?type=${type}&per_page=200`);
       if (body.users && body.users.length > 0) return body.users;
     } catch (e) {
       console.error(`getAllUsers[${type}] error:`, e.message);
@@ -142,7 +144,7 @@ function findUserId(users, email) {
 
 // ─── Per-User Stats ────────────────────────────────────────────────────────────
 
-async function fetchUserStats(token, user, userId, start, end) {
+async function fetchUserStats(authHeader, user, userId, start, end) {
   if (!userId) {
     return {
       email: user.email, name: user.name, user_id: null,
@@ -162,15 +164,15 @@ async function fetchUserStats(token, user, userId, start, end) {
     bugsOpen, bugsClosed, bugsAssignedBy,
     dealsOwned, dealsWon, callsMade
   ] = await Promise.all([
-    coqlCount(token, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(token, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
-    coqlCount(token, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status != 'Completed'`),
-    coqlCount(token, `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status != 'Closed'`),
-    coqlCount(token, `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status = 'Closed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
-    coqlCount(token, `SELECT count(id) as count FROM Cases WHERE Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(token, `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(token, `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`),
-    coqlCount(token, `SELECT count(id) as count FROM Calls WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`)
+    coqlCount(authHeader, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+    coqlCount(authHeader, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
+    coqlCount(authHeader, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status != 'Completed'`),
+    coqlCount(authHeader, `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status != 'Closed'`),
+    coqlCount(authHeader, `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status = 'Closed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
+    coqlCount(authHeader, `SELECT count(id) as count FROM Cases WHERE Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+    coqlCount(authHeader, `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+    coqlCount(authHeader, `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`),
+    coqlCount(authHeader, `SELECT count(id) as count FROM Calls WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`)
   ]);
 
   return {
@@ -294,27 +296,20 @@ app.get('/healthz', (req, res) => {
 // Debug: list all CRM users — returns raw API response for each type
 app.get('/debug/users', async (req, res) => {
   try {
-    const app_cat = catalyst.initialize(req);
-    const creds   = await app_cat.connections().getConnectionCredentials('zoho_crm_connection');
-    const token   = creds.access_token;
+    const app_cat  = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
 
-    const results = { 
-      creds_keys: Object.keys(creds || {}),
-      creds_preview: JSON.stringify(creds).substring(0, 200),
-      token_preview: token ? token.substring(0,20)+'...' : 'null', 
-      types: {} 
-    };
+    const results = { auth_preview: authHeader.substring(0,30)+'...', types: {} };
 
     for (const type of ['AllUsers', 'ActiveUsers', 'AdminUsers']) {
       try {
-        const raw = await crmGet(token, `/crm/v3/users?type=${type}&per_page=200`);
+        const raw = await crmGet(authHeader, `/crm/v3/users?type=${type}&per_page=200`);
         results.types[type] = {
           count: (raw.users || []).length,
           status: raw.status,
           code: raw.code,
           message: raw.message,
-          info: raw.info,
-          sample: (raw.users || []).slice(0,3).map(u => ({ id: u.id, email: u.email, name: u.full_name || u.name }))
+          sample: (raw.users || []).slice(0,5).map(u => ({ id: u.id, email: u.email, name: u.full_name || u.name }))
         };
       } catch (e) {
         results.types[type] = { error: e.message };
@@ -324,14 +319,14 @@ app.get('/debug/users', async (req, res) => {
     return res.json(results);
   } catch (err) {
     console.error('/debug/users error:', err);
-    return res.status(500).json({ error: err.message, stack: err.stack });
+    return res.status(500).json({ error: err.message });
   }
 });
 
 app.get(['/', '/widget'], async (req, res) => {
   try {
-    const app_cat = catalyst.initialize(req);
-    const token   = await getToken(app_cat);
+    const app_cat    = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
 
     const now        = new Date();
     const year       = parseInt(req.query.year  || now.getFullYear(), 10);
@@ -349,14 +344,14 @@ app.get(['/', '/widget'], async (req, res) => {
     console.log(`[WorkStatus] Fetching team stats for ${monthName}`);
 
     // Fetch all CRM users once, then resolve IDs for each team member
-    const allUsers = await getAllUsers(token);
+    const allUsers = await getAllUsers(authHeader);
     console.log(`[WorkStatus] CRM has ${allUsers.length} users`);
 
     const teamStats = await Promise.all(
       TEAM.map(u => {
         const userId = findUserId(allUsers, u.email);
         if (!userId) console.warn(`[WorkStatus] User not found: ${u.email}`);
-        return fetchUserStats(token, u, userId, start, end);
+        return fetchUserStats(authHeader, u, userId, start, end);
       })
     );
 
