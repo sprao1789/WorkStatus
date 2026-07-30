@@ -261,6 +261,175 @@ async function fetchUserBugDetail(authHeader, userId, start, end) {
   return { allBugs, reportedThisMonth, resolvedThisMonth: statusHistory, statusCount };
 }
 
+// ─── Manager Dashboard Data ──────────────────────────────────────────────────
+async function fetchUserManagerSnapshot(authHeader, user, userId, start, end) {
+  const summary = await fetchUserStats(authHeader, user, userId, start, end);
+  const from = toUtcDatetime(start, false);
+  const to   = toUtcDatetime(end, true);
+
+  const [taskTimeline, dealTimeline, bugReportedTimeline] = await Promise.all([
+    coqlFetchAll(authHeader, ['id','Subject','Status','Created_Time','Modified_Time'], 'Tasks',
+      `Owner = '${userId}' AND Created_Time between '${from}' and '${to}'`, 200),
+    coqlFetchAll(authHeader, ['id','Deal_Name','Stage','Created_Time','Closing_Date'], 'Deals',
+      `Owner = '${userId}' AND Created_Time between '${from}' and '${to}'`, 200),
+    coqlFetchAll(authHeader, ['id','Name','Status','Severity','Created_Time'], BUGS_MODULE,
+      `Created_By = '${userId}' AND Created_Time between '${from}' and '${to}'`, 200)
+  ]);
+
+  const timeline = [];
+  taskTimeline.forEach(t => timeline.push({
+    type: 'task',
+    title: t.Subject || '(task)',
+    status: t.Status,
+    when: t.Created_Time,
+    id: t.id,
+    icon: '📋'
+  }));
+  dealTimeline.forEach(d => timeline.push({
+    type: 'deal',
+    title: d.Deal_Name || '(deal)',
+    status: d.Stage,
+    when: d.Created_Time,
+    id: d.id,
+    icon: '💼'
+  }));
+  bugReportedTimeline.forEach(b => timeline.push({
+    type: 'bug',
+    title: b.Name || '(bug)',
+    status: b.Status,
+    when: b.Created_Time,
+    id: b.id,
+    icon: '🐛'
+  }));
+  timeline.sort((a,b) => String(b.when || '').localeCompare(String(a.when || '')));
+
+  return {
+    ...summary,
+    timeline: timeline.slice(0, 50),
+    calls_available: false,
+    calls_permission_note: 'Calls data unavailable: missing Crm_Implied_View_Calls permission'
+  };
+}
+
+function buildManagerHTML(periodLabel, snapshots, baseUrl, start, end) {
+  const cards = snapshots.map(s => {
+    const totalActivity = s.bugs_reported + s.tasks_assigned + s.deals_owned;
+    return `
+    <div class="mgr-user-card">
+      <div class="mgr-user-top">
+        <div>
+          <div class="mgr-user-name">${s.name}</div>
+          <div class="mgr-user-email">${s.email}</div>
+        </div>
+        <a class="mgr-link" href="${baseUrl}/detail?userId=${s.user_id}&userName=${encodeURIComponent(s.name)}&start=${start}&end=${end}">Open detail →</a>
+      </div>
+      <div class="mgr-metrics">
+        <div class="metric red"><span>${s.bugs_open}</span><small>Open Bugs</small></div>
+        <div class="metric orange"><span>${s.bugs_in_progress}</span><small>In Progress</small></div>
+        <div class="metric blue"><span>${s.bugs_to_test}</span><small>To Test</small></div>
+        <div class="metric purple"><span>${s.bugs_reported}</span><small>Reported</small></div>
+        <div class="metric emerald"><span>${s.tasks_assigned}</span><small>Tasks Added</small></div>
+        <div class="metric amber"><span>${s.tasks_open}</span><small>Tasks Open</small></div>
+        <div class="metric cyan"><span>${s.deals_owned}</span><small>Deals</small></div>
+        <div class="metric gray"><span>${s.calls_available ? s.calls_made : '—'}</span><small>Calls</small></div>
+      </div>
+      <div class="mgr-mini-note">Daily visible activity items: <b>${totalActivity}</b></div>
+      <div class="mgr-timeline">
+        ${(s.timeline || []).slice(0,8).map(item => `
+          <div class="tl-item">
+            <div class="tl-icon">${item.icon}</div>
+            <div class="tl-body">
+              <div class="tl-title">${item.title}</div>
+              <div class="tl-meta">${item.status || '—'} · ${(item.when || '').replace('T',' ').slice(0,16)}</div>
+            </div>
+          </div>`).join('') || '<div class="mgr-empty">No visible activity in selected range</div>'}
+      </div>
+    </div>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>WorkStatus Manager Dashboard</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#020617;--panel:#0f172a;--panel2:#111827;--border:#1f2937;--text:#e5e7eb;--muted:#94a3b8}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif;background:radial-gradient(circle at top,#111827,#020617 55%);color:var(--text);padding:0}
+  .wrap{max-width:1500px;margin:0 auto;padding:24px}
+  .hero{padding:28px 0 18px;display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+  .hero h1{font-size:28px;font-weight:900;letter-spacing:-.6px}
+  .hero p{font-size:13px;color:var(--muted);margin-top:6px}
+  .hero-badges{display:flex;gap:8px;flex-wrap:wrap}
+  .badge{background:#111827;border:1px solid var(--border);padding:8px 12px;border-radius:999px;font-size:11px;color:#cbd5e1;font-weight:700}
+  .filters{background:rgba(15,23,42,.85);backdrop-filter:blur(10px);border:1px solid var(--border);border-radius:18px;padding:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+  .filters input{background:#020617;border:1px solid #334155;color:#e2e8f0;border-radius:10px;padding:9px 12px;font-size:12px}
+  .filters a,.filters button{background:#2563eb;color:#fff;border:none;border-radius:10px;padding:10px 14px;font-size:12px;font-weight:700;text-decoration:none;cursor:pointer}
+  .filters .ghost{background:#111827;border:1px solid #334155;color:#cbd5e1}
+  .top-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
+  .top-card{background:linear-gradient(180deg,#111827,#0f172a);border:1px solid var(--border);border-radius:18px;padding:18px}
+  .top-card .v{font-size:34px;font-weight:900;line-height:1}
+  .top-card .l{font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:6px;letter-spacing:.7px}
+  .notice{margin-top:10px;font-size:11px;color:#fca5a5}
+  .mgr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:18px}
+  .mgr-user-card{background:linear-gradient(180deg,#111827,#0b1220);border:1px solid var(--border);border-radius:20px;padding:18px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+  .mgr-user-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}
+  .mgr-user-name{font-size:18px;font-weight:800}
+  .mgr-user-email{font-size:11px;color:var(--muted);margin-top:3px}
+  .mgr-link{font-size:11px;color:#60a5fa;text-decoration:none;font-weight:800;white-space:nowrap}
+  .mgr-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+  .metric{background:#0b1220;border:1px solid #1e293b;border-radius:14px;padding:12px;text-align:center}
+  .metric span{display:block;font-size:22px;font-weight:900;line-height:1}
+  .metric small{display:block;margin-top:5px;font-size:10px;color:var(--muted);text-transform:uppercase}
+  .metric.red span{color:#fb7185}.metric.orange span{color:#fb923c}.metric.blue span{color:#60a5fa}.metric.purple span{color:#c084fc}.metric.emerald span{color:#34d399}.metric.amber span{color:#fbbf24}.metric.cyan span{color:#22d3ee}.metric.gray span{color:#94a3b8}
+  .mgr-mini-note{font-size:11px;color:#cbd5e1;margin-bottom:10px}
+  .mgr-timeline{border-top:1px solid #1e293b;padding-top:10px;display:flex;flex-direction:column;gap:8px}
+  .tl-item{display:flex;gap:10px;align-items:flex-start;background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px}
+  .tl-icon{width:28px;height:28px;border-radius:8px;background:#111827;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+  .tl-title{font-size:12px;font-weight:700;color:#e5e7eb}
+  .tl-meta{font-size:10px;color:var(--muted);margin-top:2px}
+  .mgr-empty{font-size:12px;color:var(--muted);padding:12px 2px}
+  @media(max-width:1000px){.top-grid{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:640px){.top-grid{grid-template-columns:1fr}.mgr-metrics{grid-template-columns:repeat(2,1fr)}.wrap{padding:16px}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div>
+      <h1>Manager Activity Dashboard</h1>
+      <p>One view to track what everyone is doing daily · ${periodLabel}</p>
+    </div>
+    <div class="hero-badges">
+      <div class="badge">Bugs ✅</div>
+      <div class="badge">Tasks ✅</div>
+      <div class="badge">Deals ✅</div>
+      <div class="badge">Calls ❌ Permission missing</div>
+    </div>
+  </div>
+
+  <form class="filters" method="get" action="${baseUrl}/manager">
+    <input type="date" name="start" value="${start}">
+    <input type="date" name="end" value="${end}">
+    <button type="submit">Apply Range</button>
+    <a class="ghost" href="${baseUrl}/manager">Reset</a>
+    <a class="ghost" href="${baseUrl}/widget">Team Cards</a>
+  </form>
+
+  <div class="top-grid">
+    <div class="top-card"><div class="v">${snapshots.reduce((a,s)=>a+(s.bugs_open+s.bugs_in_progress+s.bugs_to_test),0)}</div><div class="l">Total Active Bugs</div></div>
+    <div class="top-card"><div class="v">${snapshots.reduce((a,s)=>a+s.bugs_reported,0)}</div><div class="l">Bugs Reported</div></div>
+    <div class="top-card"><div class="v">${snapshots.reduce((a,s)=>a+s.tasks_assigned,0)}</div><div class="l">Tasks Added</div></div>
+    <div class="top-card"><div class="v">${snapshots.reduce((a,s)=>a+s.deals_owned,0)}</div><div class="l">Deals Created</div><div class="notice">Calls blocked by CRM permission</div></div>
+  </div>
+
+  <div class="mgr-grid">${cards}</div>
+</div>
+</body>
+</html>`;
+}
+
 // ─── HTML helpers ─────────────────────────────────────────────────────────────
 // Colors for ALL status values confirmed from live data
 const STATUS_COLORS = {
@@ -926,6 +1095,54 @@ app.get(['/', '/widget'], async (req, res) => {
     return res.send(buildWidgetHTML(monthName, teamStats, baseUrl));
   } catch (err) {
     console.error('[WorkStatus] Error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Unified manager dashboard
+app.get('/manager', async (req, res) => {
+  try {
+    const app_cat    = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
+
+    const pad = n => String(n).padStart(2, '0');
+    const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const now = new Date();
+
+    let start, end, periodLabel;
+    if (req.query.start && req.query.end) {
+      start = req.query.start;
+      end   = req.query.end;
+      const s = new Date(start + 'T12:00:00');
+      const e = new Date(end   + 'T12:00:00');
+      periodLabel = `${s.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'})} – ${e.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'})}`;
+    } else {
+      const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+      const lastDay  = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      start = fmt(firstDay);
+      end   = fmt(lastDay);
+      periodLabel = firstDay.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+    }
+
+    const baseUrl = `${req.protocol}://${req.get('host')}/server/crm-monthly-stats`;
+
+    const snapshots = await Promise.all(
+      TEAM.map(async u => {
+        const userId = await findUserIdByEmail(authHeader, u.email);
+        return fetchUserManagerSnapshot(authHeader, u, userId, start, end);
+      })
+    );
+
+    if (req.query.format === 'json') {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ period: { start, end, label: periodLabel }, team: snapshots, note: 'Calls unavailable due to CRM permission: Crm_Implied_View_Calls' });
+    }
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(buildManagerHTML(periodLabel, snapshots, baseUrl, start, end));
+  } catch (err) {
+    console.error('[WorkStatus] Manager dashboard error:', err);
     return res.status(500).json({ error: err.message });
   }
 });
