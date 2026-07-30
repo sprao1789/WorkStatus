@@ -298,7 +298,12 @@ app.get('/debug/users', async (req, res) => {
     const creds   = await app_cat.connections().getConnectionCredentials('zoho_crm_connection');
     const token   = creds.access_token;
 
-    const results = { token_preview: token ? token.substring(0,20)+'...' : 'null', types: {} };
+    const results = { 
+      creds_keys: Object.keys(creds || {}),
+      creds_preview: JSON.stringify(creds).substring(0, 200),
+      token_preview: token ? token.substring(0,20)+'...' : 'null', 
+      types: {} 
+    };
 
     for (const type of ['AllUsers', 'ActiveUsers', 'AdminUsers']) {
       try {
