@@ -236,12 +236,13 @@ async function fetchUserBugDetail(authHeader, userId, start, end) {
   const to   = toUtcDatetime(end, true);
 
   // Build the COQL exclusion list from all known closed statuses
+  // Also exclude null-status bugs (Status is null) — these are test automation bugs with no status set
   const closedStatusCoql = CLOSED_STATUSES.map(s => `'${s}'`).join(', ');
 
   const [allBugs, reportedThisMonth, statusHistory] = await Promise.all([
-    // All active bugs owned by user — exclude ALL closed/resolved statuses
+    // All active bugs owned by user — exclude ALL closed/resolved statuses and null-status bugs
     coqlFetchAll(authHeader, ['id','Name','Status','Severity','Created_Time','Modified_Time'],
-      BUGS_MODULE, `Owner = '${userId}' AND Status not in (${closedStatusCoql})`),
+      BUGS_MODULE, `Owner = '${userId}' AND Status not in (${closedStatusCoql}) AND Status is not null`),
     // Bugs reported this month by user
     coqlFetchAll(authHeader, ['id','Name','Status','Severity','Created_Time'],
       BUGS_MODULE, `Created_By = '${userId}' AND Created_Time between '${from}' and '${to}'`),
