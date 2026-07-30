@@ -2,8 +2,9 @@
  * WorkStatus — CRM Monthly Stats (Per-User Team Dashboard)
  * Catalyst Advanced IO Function using Express.js (Node.js 18)
  *
- * Uses Catalyst Connection "zoho_crm_connection" (OAuth, configured in Catalyst console).
- * No hardcoded tokens.
+ * Uses Catalyst Built-in Connection "zoho_crm_connection" (OAuth, configured in Catalyst console).
+ * Pattern: app.connection().getConnector('zoho_crm_connection').getAccessToken()
+ *          then uses Node https to call Zoho CRM APIs with Bearer token.
  *
  * Team members tracked:
  *   - paparao.s@zohocorp.com
@@ -13,19 +14,16 @@
  *   - harish.subramanian@zohocorp.com
  *
  * Routes:
- *   GET /server/crm-monthly-stats/          → JSON stats
- *   GET /server/crm-monthly-stats/widget    → HTML widget
- *   GET /server/crm-monthly-stats/healthz   → { ok: true }
- *
- * Required Catalyst Connection scopes:
- *   ZohoCRM.modules.ALL, ZohoCRM.settings.ALL,
- *   ZohoCRM.users.ALL, ZohoCRM.org.ALL,
- *   ZohoCRM.bulk.ALL, ZohoCRM.coql.READ
+ *   GET /server/crm-monthly-stats/            → JSON stats
+ *   GET /server/crm-monthly-stats/widget      → HTML widget
+ *   GET /server/crm-monthly-stats/healthz     → { ok: true }
+ *   GET /server/crm-monthly-stats/debug/users → list all CRM users (for debugging)
  */
 
 'use strict';
 
 const express  = require('express');
+const https    = require('https');
 const catalyst = require('zcatalyst-sdk-node');
 
 const app = express();
@@ -43,83 +41,108 @@ app.use((req, _res, next) => {
 // ─── Team Members ─────────────────────────────────────────────────────────────
 
 const TEAM = [
-  { email: 'paparao.s@zohocorp.com',        name: 'Paparao S' },
-  { email: 'muthu.p@zohocorp.com',           name: 'Muthu P' },
-  { email: 'naveenkarthick.s@zohocorp.com',  name: 'Naveenkarthick S' },
-  { email: 'vishwa.sr@zohocorp.com',         name: 'Vishwa SR' },
-  { email: 'harish.subramanian@zohocorp.com',name: 'Harish Subramanian' }
+  { email: 'paparao.s@zohocorp.com',         name: 'Paparao S' },
+  { email: 'muthu.p@zohocorp.com',            name: 'Muthu P' },
+  { email: 'naveenkarthick.s@zohocorp.com',   name: 'Naveenkarthick S' },
+  { email: 'vishwa.sr@zohocorp.com',          name: 'Vishwa SR' },
+  { email: 'harish.subramanian@zohocorp.com', name: 'Harish Subramanian' }
 ];
 
-// ─── Date helpers ─────────────────────────────────────────────────────────────
+// ─── HTTP helper using Node https + Bearer token ───────────────────────────────
 
-function getMonthRange(year, month) {
-  const firstDay = new Date(year, month, 1);
-  const lastDay  = new Date(year, month + 1, 0);
-  const pad = n => String(n).padStart(2, '0');
-  const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  return {
-    start:     fmt(firstDay),
-    end:       fmt(lastDay),
-    monthName: firstDay.toLocaleString('en-IN', { month: 'long', year: 'numeric' })
-  };
+function crmGet(token, path) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'www.zohoapis.in',
+      path:     path,
+      method:   'GET',
+      headers:  { 'Authorization': `Zoho-oauthtoken ${token}` }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(new Error(`JSON parse error: ${data.substring(0,200)}`)); }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function crmPost(token, path, body) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify(body);
+    const options = {
+      hostname: 'www.zohoapis.in',
+      path:     path,
+      method:   'POST',
+      headers:  {
+        'Authorization': `Zoho-oauthtoken ${token}`,
+        'Content-Type':  'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(new Error(`JSON parse error: ${data.substring(0,200)}`)); }
+      });
+    });
+    req.on('error', reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+// ─── Get access token from Catalyst connection ─────────────────────────────────
+
+async function getToken(catalystApp) {
+  const connector = catalystApp.connection().getConnector('zoho_crm_connection');
+  return await connector.getAccessToken();
 }
 
 // ─── CRM helpers ──────────────────────────────────────────────────────────────
 
-async function coqlQuery(connection, query) {
+async function coqlCount(token, query) {
   try {
-    const resp = await connection.post(
-      'https://www.zohoapis.in/crm/v3/coql',
-      JSON.stringify({ select_query: query }),
-      { 'Content-Type': 'application/json' }
-    );
-    const body = JSON.parse(resp.getBody());
-    return body.data || [];
+    const body = await crmPost(token, '/crm/v3/coql', { select_query: query });
+    return (body.data && body.data[0] && body.data[0].count !== undefined)
+      ? body.data[0].count : 0;
   } catch (e) {
-    console.error('COQL error:', query.substring(0, 80), e.message);
+    console.error('COQL error:', e.message);
+    return 0;
+  }
+}
+
+async function getAllUsers(token) {
+  try {
+    const body = await crmGet(token, '/crm/v3/users?type=AllUsers&per_page=200');
+    return body.users || [];
+  } catch (e) {
+    console.error('getAllUsers error:', e.message);
     return [];
   }
 }
 
-async function coqlCount(connection, query) {
-  const rows = await coqlQuery(connection, query);
-  return (rows.length > 0 && rows[0].count !== undefined) ? rows[0].count : 0;
-}
-
-// Fetch Zoho CRM user ID by email
-async function getUserId(connection, email) {
-  try {
-    const resp = await connection.get(
-      `https://www.zohoapis.in/crm/v3/users?type=ActiveUsers`
-    );
-    const body = JSON.parse(resp.getBody());
-    const users = body.users || [];
-    const match = users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
-    return match ? match.id : null;
-  } catch (e) {
-    console.error(`getUserId error for ${email}:`, e.message);
-    return null;
-  }
+function findUserId(users, email) {
+  const match = users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
+  return match ? match.id : null;
 }
 
 // ─── Per-User Stats ────────────────────────────────────────────────────────────
 
-async function fetchUserStats(connection, user, userId, start, end) {
+async function fetchUserStats(token, user, userId, start, end) {
   if (!userId) {
     return {
-      email: user.email,
-      name:  user.name,
-      user_id: null,
+      email: user.email, name: user.name, user_id: null,
       error: 'User not found in CRM',
-      tasks_assigned:  0,
-      tasks_completed: 0,
-      tasks_open:      0,
-      bugs_open:       0,
-      bugs_closed:     0,
-      bugs_assigned_by_user: 0,
-      deals_owned:     0,
-      deals_won:       0,
-      calls_made:      0
+      tasks_assigned: 0, tasks_completed: 0, tasks_open: 0,
+      bugs_open: 0, bugs_closed: 0, bugs_assigned_by_user: 0,
+      deals_owned: 0, deals_won: 0, calls_made: 0
     };
   }
 
@@ -127,48 +150,24 @@ async function fetchUserStats(connection, user, userId, start, end) {
   const from = `${start}T00:00:00${tz}`;
   const to   = `${end}T23:59:59${tz}`;
 
-  // Tasks — assigned TO this user this month
-  const tasksAssignedQ = `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
-  // Tasks — completed BY this user this month
-  const tasksCompletedQ = `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`;
-  // Tasks — open (assigned, not yet done)
-  const tasksOpenQ = `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status != 'Completed'`;
-
-  // Bugs (using Cases module in CRM — covers bug reports / issues)
-  // Open bugs assigned to this user
-  const bugsOpenQ = `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status != 'Closed'`;
-  // Closed bugs this month by this user
-  const bugsClosedQ = `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status = 'Closed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`;
-  // Bugs reported/created by this user (Created_By)
-  const bugsAssignedByQ = `SELECT count(id) as count FROM Cases WHERE Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
-
-  // Deals owned by this user this month
-  const dealsOwnedQ = `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
-  // Deals won by this user this month
-  const dealsWonQ = `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`;
-  // Calls made by this user this month
-  const callsMadeQ = `SELECT count(id) as count FROM Calls WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
-
   const [
     tasksAssigned, tasksCompleted, tasksOpen,
     bugsOpen, bugsClosed, bugsAssignedBy,
     dealsOwned, dealsWon, callsMade
   ] = await Promise.all([
-    coqlCount(connection, tasksAssignedQ),
-    coqlCount(connection, tasksCompletedQ),
-    coqlCount(connection, tasksOpenQ),
-    coqlCount(connection, bugsOpenQ),
-    coqlCount(connection, bugsClosedQ),
-    coqlCount(connection, bugsAssignedByQ),
-    coqlCount(connection, dealsOwnedQ),
-    coqlCount(connection, dealsWonQ),
-    coqlCount(connection, callsMadeQ)
+    coqlCount(token, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+    coqlCount(token, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
+    coqlCount(token, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status != 'Completed'`),
+    coqlCount(token, `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status != 'Closed'`),
+    coqlCount(token, `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status = 'Closed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
+    coqlCount(token, `SELECT count(id) as count FROM Cases WHERE Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+    coqlCount(token, `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+    coqlCount(token, `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`),
+    coqlCount(token, `SELECT count(id) as count FROM Calls WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`)
   ]);
 
   return {
-    email:   user.email,
-    name:    user.name,
-    user_id: userId,
+    email: user.email, name: user.name, user_id: userId,
     tasks_assigned:        tasksAssigned,
     tasks_completed:       tasksCompleted,
     tasks_open:            tasksOpen,
@@ -206,84 +205,24 @@ function buildWidgetHTML(monthName, teamStats) {
           <div class="member-email">${u.email}</div>
         </div>
       </div>
-
       <div class="stat-row">
-        <div class="stat-item">
-          <span class="stat-icon">📋</span>
-          <div>
-            <div class="stat-val">${u.tasks_assigned}</div>
-            <div class="stat-lbl">Assigned Tasks</div>
-          </div>
-        </div>
-        <div class="stat-item">
-          <span class="stat-icon">✅</span>
-          <div>
-            <div class="stat-val">${u.tasks_completed}</div>
-            <div class="stat-lbl">Completed</div>
-          </div>
-        </div>
-        <div class="stat-item">
-          <span class="stat-icon">⏳</span>
-          <div>
-            <div class="stat-val">${u.tasks_open}</div>
-            <div class="stat-lbl">Open Tasks</div>
-          </div>
-        </div>
+        <div class="stat-item"><span class="stat-icon">📋</span><div><div class="stat-val">${u.tasks_assigned}</div><div class="stat-lbl">Assigned</div></div></div>
+        <div class="stat-item"><span class="stat-icon">✅</span><div><div class="stat-val">${u.tasks_completed}</div><div class="stat-lbl">Completed</div></div></div>
+        <div class="stat-item"><span class="stat-icon">⏳</span><div><div class="stat-val">${u.tasks_open}</div><div class="stat-lbl">Open Tasks</div></div></div>
       </div>
-
       <div class="progress-bar-wrap">
         <div class="progress-label">Task Completion: ${taskPct}%</div>
-        <div class="progress-bar">
-          <div class="progress-fill" style="width:${taskPct}%;background:${color}"></div>
-        </div>
+        <div class="progress-bar"><div class="progress-fill" style="width:${taskPct}%;background:${color}"></div></div>
       </div>
-
       <div class="stat-row">
-        <div class="stat-item bug">
-          <span class="stat-icon">🐛</span>
-          <div>
-            <div class="stat-val red">${u.bugs_open}</div>
-            <div class="stat-lbl">Open Bugs</div>
-          </div>
-        </div>
-        <div class="stat-item bug">
-          <span class="stat-icon">🔒</span>
-          <div>
-            <div class="stat-val green">${u.bugs_closed}</div>
-            <div class="stat-lbl">Closed Bugs</div>
-          </div>
-        </div>
-        <div class="stat-item bug">
-          <span class="stat-icon">📌</span>
-          <div>
-            <div class="stat-val">${u.bugs_assigned_by_user}</div>
-            <div class="stat-lbl">Reported</div>
-          </div>
-        </div>
+        <div class="stat-item"><span class="stat-icon">🐛</span><div><div class="stat-val red">${u.bugs_open}</div><div class="stat-lbl">Open Bugs</div></div></div>
+        <div class="stat-item"><span class="stat-icon">🔒</span><div><div class="stat-val green">${u.bugs_closed}</div><div class="stat-lbl">Closed Bugs</div></div></div>
+        <div class="stat-item"><span class="stat-icon">📌</span><div><div class="stat-val">${u.bugs_assigned_by_user}</div><div class="stat-lbl">Reported</div></div></div>
       </div>
-
       <div class="stat-row">
-        <div class="stat-item">
-          <span class="stat-icon">🎯</span>
-          <div>
-            <div class="stat-val">${u.deals_owned}</div>
-            <div class="stat-lbl">Deals Owned</div>
-          </div>
-        </div>
-        <div class="stat-item">
-          <span class="stat-icon">🏆</span>
-          <div>
-            <div class="stat-val green">${u.deals_won}</div>
-            <div class="stat-lbl">Deals Won</div>
-          </div>
-        </div>
-        <div class="stat-item">
-          <span class="stat-icon">📞</span>
-          <div>
-            <div class="stat-val">${u.calls_made}</div>
-            <div class="stat-lbl">Calls Made</div>
-          </div>
-        </div>
+        <div class="stat-item"><span class="stat-icon">🎯</span><div><div class="stat-val">${u.deals_owned}</div><div class="stat-lbl">Deals</div></div></div>
+        <div class="stat-item"><span class="stat-icon">🏆</span><div><div class="stat-val green">${u.deals_won}</div><div class="stat-lbl">Won</div></div></div>
+        <div class="stat-item"><span class="stat-icon">📞</span><div><div class="stat-val">${u.calls_made}</div><div class="stat-lbl">Calls</div></div></div>
       </div>
       ${u.error ? `<div class="error-note">⚠️ ${u.error}</div>` : ''}
     </div>`;
@@ -317,7 +256,7 @@ function buildWidgetHTML(monthName, teamStats) {
   .progress-bar-wrap{margin-bottom:10px}
   .progress-label{font-size:11px;color:#888;margin-bottom:4px}
   .progress-bar{background:#f0f0f0;border-radius:20px;height:8px;overflow:hidden}
-  .progress-fill{height:100%;border-radius:20px;transition:width .3s}
+  .progress-fill{height:100%;border-radius:20px}
   .error-note{font-size:11px;color:#e03131;margin-top:8px;padding:6px;background:#fff5f5;border-radius:6px}
   .footer{text-align:center;margin-top:20px;font-size:12px;color:#aaa}
   .footer a{color:#e03131;text-decoration:none;font-weight:600;margin-left:8px}
@@ -329,9 +268,7 @@ function buildWidgetHTML(monthName, teamStats) {
   <h1>📊 WorkStatus — Team CRM Dashboard</h1>
   <p>${monthName} &nbsp;·&nbsp; Per-Member Stats: Tasks · Bugs · Deals · Calls</p>
 </div>
-<div class="team-grid">
-  ${memberCards}
-</div>
+<div class="team-grid">${memberCards}</div>
 <div class="footer">
   Updated: ${new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})} IST
   <a href="javascript:location.reload()">🔄 Refresh</a>
@@ -351,32 +288,14 @@ app.get('/healthz', (req, res) => {
 app.get('/debug/users', async (req, res) => {
   try {
     const app_cat = catalyst.initialize(req);
-    const connection = app_cat.connection('zoho_crm_connection');
-
-    // Try all user types
-    const types = ['ActiveUsers', 'DeactiveUsers', 'AdminUsers', 'AllUsers'];
-    const results = {};
-
-    for (const type of types) {
-      try {
-        const resp = await connection.get(
-          `https://www.zohoapis.in/crm/v3/users?type=${type}`
-        );
-        const body = JSON.parse(resp.getBody());
-        results[type] = (body.users || []).map(u => ({
-          id: u.id,
-          email: u.email,
-          name: u.full_name || u.name,
-          role: u.role ? u.role.name : null,
-          status: u.status
-        }));
-      } catch (e) {
-        results[type] = { error: e.message };
-      }
-    }
-
-    return res.json(results);
+    const token   = await getToken(app_cat);
+    const users   = await getAllUsers(token);
+    return res.json({
+      total: users.length,
+      users: users.map(u => ({ id: u.id, email: u.email, name: u.full_name || u.name, status: u.status }))
+    });
   } catch (err) {
+    console.error('/debug/users error:', err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -384,35 +303,33 @@ app.get('/debug/users', async (req, res) => {
 app.get(['/', '/widget'], async (req, res) => {
   try {
     const app_cat = catalyst.initialize(req);
-    const connection = app_cat.connection('zoho_crm_connection');
+    const token   = await getToken(app_cat);
 
     const now        = new Date();
     const year       = parseInt(req.query.year  || now.getFullYear(), 10);
     const monthParam = parseInt(req.query.month || (now.getMonth() + 1), 10);
-    const { start, end, monthName } = (() => {
-      const firstDay = new Date(year, monthParam - 1, 1);
-      const lastDay  = new Date(year, monthParam, 0);
-      const pad = n => String(n).padStart(2, '0');
-      const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-      return {
-        start:     fmt(firstDay),
-        end:       fmt(lastDay),
-        monthName: firstDay.toLocaleString('en-IN', { month: 'long', year: 'numeric' })
-      };
-    })();
+    const firstDay   = new Date(year, monthParam - 1, 1);
+    const lastDay    = new Date(year, monthParam, 0);
+    const pad = n => String(n).padStart(2, '0');
+    const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const start     = fmt(firstDay);
+    const end       = fmt(lastDay);
+    const monthName = firstDay.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
 
     const wantHTML = req.query.format === 'html' || req.path.endsWith('/widget');
 
     console.log(`[WorkStatus] Fetching team stats for ${monthName}`);
 
-    // Step 1: Resolve user IDs for all team members in parallel
-    const userIds = await Promise.all(
-      TEAM.map(u => getUserId(connection, u.email))
-    );
+    // Fetch all CRM users once, then resolve IDs for each team member
+    const allUsers = await getAllUsers(token);
+    console.log(`[WorkStatus] CRM has ${allUsers.length} users`);
 
-    // Step 2: Fetch per-user stats in parallel
     const teamStats = await Promise.all(
-      TEAM.map((u, i) => fetchUserStats(connection, u, userIds[i], start, end))
+      TEAM.map(u => {
+        const userId = findUserId(allUsers, u.email);
+        if (!userId) console.warn(`[WorkStatus] User not found: ${u.email}`);
+        return fetchUserStats(token, u, userId, start, end);
+      })
     );
 
     if (wantHTML) {
@@ -422,12 +339,7 @@ app.get(['/', '/widget'], async (req, res) => {
     }
 
     res.setHeader('Cache-Control', 'no-store, max-age=0');
-    return res.json({
-      month:     monthName,
-      period:    { start, end },
-      team:      teamStats,
-      generated_at: new Date().toISOString()
-    });
+    return res.json({ month: monthName, period: { start, end }, team: teamStats, generated_at: new Date().toISOString() });
 
   } catch (err) {
     console.error('[WorkStatus] Error:', err);
