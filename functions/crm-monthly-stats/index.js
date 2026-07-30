@@ -347,6 +347,40 @@ app.get('/healthz', (req, res) => {
   res.json({ ok: true, service: 'WorkStatus Team Dashboard', ts: new Date().toISOString() });
 });
 
+// Debug: list all CRM users so we can verify the exact emails
+app.get('/debug/users', async (req, res) => {
+  try {
+    const app_cat = catalyst.initialize(req);
+    const connection = app_cat.connection('zoho_crm_connection');
+
+    // Try all user types
+    const types = ['ActiveUsers', 'DeactiveUsers', 'AdminUsers', 'AllUsers'];
+    const results = {};
+
+    for (const type of types) {
+      try {
+        const resp = await connection.get(
+          `https://www.zohoapis.in/crm/v3/users?type=${type}`
+        );
+        const body = JSON.parse(resp.getBody());
+        results[type] = (body.users || []).map(u => ({
+          id: u.id,
+          email: u.email,
+          name: u.full_name || u.name,
+          role: u.role ? u.role.name : null,
+          status: u.status
+        }));
+      } catch (e) {
+        results[type] = { error: e.message };
+      }
+    }
+
+    return res.json(results);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.get(['/', '/widget'], async (req, res) => {
   try {
     const app_cat = catalyst.initialize(req);
