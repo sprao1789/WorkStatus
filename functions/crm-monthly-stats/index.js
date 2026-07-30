@@ -232,7 +232,15 @@ app.get(['/', '/widget'], async (req, res) => {
 
     const wantHTML = req.query.format === 'html' || req.path.endsWith('/widget');
 
-    // Get the Catalyst Connection — must be created in Catalyst console first
+    // Get the Catalyst Connection
+    // Connection name: zoho_crm_connection
+    // Required scopes (set these in Catalyst Console → Connections → zoho_crm_connection):
+    //   ZohoCRM.modules.ALL
+    //   ZohoCRM.settings.ALL
+    //   ZohoCRM.users.ALL
+    //   ZohoCRM.org.ALL
+    //   ZohoCRM.bulk.ALL
+    //   ZohoCRM.coql.READ
     const connection = app_cat.connection('zoho_crm_connection');
 
     console.log(`[WorkStatus] Fetching stats for ${monthName} (${start} → ${end})`);
