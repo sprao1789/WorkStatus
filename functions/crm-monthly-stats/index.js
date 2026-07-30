@@ -1252,6 +1252,31 @@ app.get('/debug/fields', async (req, res) => {
   }
 });
 
+// Inspect records from any module with arbitrary field list
+// Example:
+//   /debug/records?module=QA_Audit_LoadTesting&fields=id,Name,Owner,Automation_Developer,LoadTesting_Status,UI_cases_added&limit=20
+app.get('/debug/records', async (req, res) => {
+  try {
+    const app_cat = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
+    const moduleApiName = req.query.module;
+    const fieldsParam   = req.query.fields;
+    const limit         = parseInt(req.query.limit || '20', 10);
+    const whereClause   = req.query.where || "id != '0'";
+
+    if (!moduleApiName || !fieldsParam) {
+      return res.status(400).json({ error: 'Missing ?module=API_NAME&fields=f1,f2,f3' });
+    }
+
+    const fields = fieldsParam.split(',').map(s => s.trim()).filter(Boolean);
+    const query  = `SELECT ${fields.join(', ')} FROM ${moduleApiName} WHERE ${whereClause} LIMIT ${Math.min(limit, 100)}`;
+    const body   = await crmPost(authHeader, '/crm/v3/coql', { select_query: query });
+    return res.json({ module: moduleApiName, query, response: body });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/debug/coql', async (req, res) => {
   try {
     const app_cat = catalyst.initialize(req);
