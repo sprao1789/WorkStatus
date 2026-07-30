@@ -123,11 +123,40 @@ async function getAuthHeader(catalystApp) {
   return authHeader;
 }
 
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+//
+// Zoho CRM COQL does NOT accept '+05:30' timezone in datetime strings — it returns empty body.
+// We must use UTC datetime strings ('YYYY-MM-DDTHH:MM:SSZ') as filter values.
+//
+// IST = UTC+5:30, so:
+//   IST midnight (start of day) = previous day 18:30 UTC
+//   IST end of day (23:59:59)   = same day 18:29:59 UTC
+//
+function toUtcDatetime(dateStr, isEndOfDay) {
+  // dateStr = 'YYYY-MM-DD'
+  const [y, m, d] = dateStr.split('-').map(Number);
+  let utcDate;
+  if (isEndOfDay) {
+    // end of IST day = next day UTC 18:29:59 — but simpler: use next day start in UTC
+    // 2026-07-31 23:59:59 IST = 2026-07-31 18:29:59 UTC
+    utcDate = new Date(Date.UTC(y, m - 1, d, 18, 29, 59));
+  } else {
+    // start of IST day = previous day 18:30:00 UTC
+    // 2026-07-01 00:00:00 IST = 2026-06-30 18:30:00 UTC
+    utcDate = new Date(Date.UTC(y, m - 1, d - 1, 18, 30, 0));
+  }
+  return utcDate.toISOString().replace('.000Z', 'Z'); // e.g. '2026-06-30T18:30:00Z'
+}
+
 // ─── COQL Count via Pagination ────────────────────────────────────────────────
 //
 // count(id) is not supported in COQL for this org.
 // Instead we paginate SELECT id FROM Module WHERE ... LIMIT 200 OFFSET N
 // and accumulate the total. CRM COQL max offset is 10,000.
+//
+// IMPORTANT COQL RESTRICTIONS DISCOVERED:
+//  - '!=' operator on string fields returns EMPTY body (HTTP 500) — use 'not in' instead
+//  - Datetime values with '+05:30' timezone return empty body — use UTC ('...Z') format
 //
 async function coqlCountPaged(authHeader, label, whereClause, module) {
   let total  = 0;
@@ -194,14 +223,15 @@ async function fetchUserStats(authHeader, user, userId, start, end) {
     };
   }
 
-  const from = `${start}T00:00:00+05:30`;
-  const to   = `${end}T23:59:59+05:30`;
+  // Use UTC datetimes — COQL rejects '+05:30' timezone offsets with empty body.
+  // IST day start = previous day 18:30 UTC; IST day end = same day 18:29:59 UTC
+  const from = toUtcDatetime(start, false); // e.g. '2026-06-30T18:30:00Z'
+  const to   = toUtcDatetime(end,   true);  // e.g. '2026-07-31T18:29:59Z'
 
-  console.log(`[WorkStatus] Fetching stats: ${user.email} (${userId}), ${start}..${end}`);
+  console.log(`[WorkStatus] Fetching stats: ${user.email} (${userId}), ${from}..${to}`);
 
   // Bug Status values in this org: "Open", "Fixed", "Closed"
-  // Open  = Status = 'Open'
-  // Closed/Fixed = Status = 'Fixed' OR Status = 'Closed'
+  // COQL quirk: '!=' operator on string fields returns empty body — use 'not in' instead
   const bugOpenFilter     = `Owner = '${userId}' AND Status = 'Open'`;
   const bugClosedFilter   = `Owner = '${userId}' AND (Status = 'Closed' OR Status = 'Fixed') AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`;
   const bugReportedFilter = `Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
@@ -217,14 +247,14 @@ async function fetchUserStats(authHeader, user, userId, start, end) {
       `Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`,
       'Tasks'),
 
-    // Tasks completed this month
+    // Tasks completed this month (Modified_Time in range)
     coqlCountPaged(authHeader, `${user.name}:tasks_completed`,
       `Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`,
       'Tasks'),
 
-    // Tasks currently open (all time)
+    // Tasks currently open (all time) — use 'not in' instead of != to avoid empty body
     coqlCountPaged(authHeader, `${user.name}:tasks_open`,
-      `Owner = '${userId}' AND Status != 'Completed'`,
+      `Owner = '${userId}' AND Status not in ('Completed', 'Deferred')`,
       'Tasks'),
 
     // Bugs currently open (Status = Open, all time)
@@ -244,7 +274,7 @@ async function fetchUserStats(authHeader, user, userId, start, end) {
       `Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`,
       'Deals'),
 
-    // Deals won this month (Closing_Date is a Date field, not DateTime)
+    // Deals won this month (Closing_Date is a Date field, not DateTime — use date strings)
     coqlCountPaged(authHeader, `${user.name}:deals_won`,
       `Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`,
       'Deals'),
