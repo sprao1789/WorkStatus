@@ -124,22 +124,24 @@ async function coqlCount(authHeader, query) {
   }
 }
 
-async function getAllUsers(authHeader) {
-  const types = ['AllUsers', 'ActiveUsers', 'AdminUsers'];
-  for (const type of types) {
+// Search CRM for a specific user email by paginating through all users
+async function findUserIdByEmail(authHeader, email) {
+  let page = 1;
+  while (page <= 20) {
     try {
-      const body = await crmGet(authHeader, `/crm/v3/users?type=${type}&per_page=200`);
-      if (body.users && body.users.length > 0) return body.users;
+      const body = await crmGet(authHeader, `/crm/v3/users?type=AllUsers&per_page=200&page=${page}`);
+      const users = body.users || [];
+      const match = users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
+      if (match) return match.id;
+      // Stop if no more pages
+      if (!body.info || !body.info.more_records || users.length < 200) break;
+      page++;
     } catch (e) {
-      console.error(`getAllUsers[${type}] error:`, e.message);
+      console.error(`findUserIdByEmail(${email}) page=${page} error:`, e.message);
+      break;
     }
   }
-  return [];
-}
-
-function findUserId(users, email) {
-  const match = users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
-  return match ? match.id : null;
+  return null;
 }
 
 // ─── Per-User Stats ────────────────────────────────────────────────────────────
@@ -343,13 +345,10 @@ app.get(['/', '/widget'], async (req, res) => {
 
     console.log(`[WorkStatus] Fetching team stats for ${monthName}`);
 
-    // Fetch all CRM users once, then resolve IDs for each team member
-    const allUsers = await getAllUsers(authHeader);
-    console.log(`[WorkStatus] CRM has ${allUsers.length} users`);
-
+    // Resolve user IDs for each team member in parallel
     const teamStats = await Promise.all(
-      TEAM.map(u => {
-        const userId = findUserId(allUsers, u.email);
+      TEAM.map(async u => {
+        const userId = await findUserIdByEmail(authHeader, u.email);
         if (!userId) console.warn(`[WorkStatus] User not found: ${u.email}`);
         return fetchUserStats(authHeader, u, userId, start, end);
       })
