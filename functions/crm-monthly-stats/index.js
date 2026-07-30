@@ -230,11 +230,13 @@ async function fetchUserStats(authHeader, user, userId, start, end) {
 
   console.log(`[WorkStatus] Fetching stats: ${user.email} (${userId}), ${from}..${to}`);
 
-  // Bug Status values in this org: "Open", "Fixed", "Closed"
-  // COQL quirk: '!=' operator on string fields returns empty body — use 'not in' instead
+  // COQL quirks:
+  //   - '!='        returns empty body — use 'not in' instead
+  //   - '>= AND <=' on datetime returns SYNTAX_ERROR — use 'between ... and ...' instead
+  //   - '+05:30' tz in datetime returns empty body — use UTC 'Z' suffix
   const bugOpenFilter     = `Owner = '${userId}' AND Status = 'Open'`;
-  const bugClosedFilter   = `Owner = '${userId}' AND (Status = 'Closed' OR Status = 'Fixed') AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`;
-  const bugReportedFilter = `Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`;
+  const bugClosedFilter   = `Owner = '${userId}' AND (Status = 'Closed' OR Status = 'Fixed') AND Modified_Time between '${from}' and '${to}'`;
+  const bugReportedFilter = `Created_By = '${userId}' AND Created_Time between '${from}' and '${to}'`;
 
   const [
     tasksAssigned, tasksCompleted, tasksOpen,
@@ -242,17 +244,17 @@ async function fetchUserStats(authHeader, user, userId, start, end) {
     dealsOwned, dealsWon, callsMade
   ] = await Promise.all([
 
-    // Tasks created this month owned by user
+    // Tasks created this month — use BETWEEN for datetime range (>= AND <= fails in COQL)
     coqlCountPaged(authHeader, `${user.name}:tasks_assigned`,
-      `Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`,
+      `Owner = '${userId}' AND Created_Time between '${from}' and '${to}'`,
       'Tasks'),
 
-    // Tasks completed this month (Modified_Time in range)
+    // Tasks completed this month
     coqlCountPaged(authHeader, `${user.name}:tasks_completed`,
-      `Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`,
+      `Owner = '${userId}' AND Status = 'Completed' AND Modified_Time between '${from}' and '${to}'`,
       'Tasks'),
 
-    // Tasks currently open (all time) — use 'not in' instead of != to avoid empty body
+    // Tasks currently open (all time) — 'not in' avoids the != empty-body bug
     coqlCountPaged(authHeader, `${user.name}:tasks_open`,
       `Owner = '${userId}' AND Status not in ('Completed', 'Deferred')`,
       'Tasks'),
@@ -271,17 +273,17 @@ async function fetchUserStats(authHeader, user, userId, start, end) {
 
     // Deals created this month
     coqlCountPaged(authHeader, `${user.name}:deals_owned`,
-      `Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`,
+      `Owner = '${userId}' AND Created_Time between '${from}' and '${to}'`,
       'Deals'),
 
-    // Deals won this month (Closing_Date is a Date field, not DateTime — use date strings)
+    // Deals won this month (Closing_Date is a Date field — use BETWEEN with date strings)
     coqlCountPaged(authHeader, `${user.name}:deals_won`,
-      `Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`,
+      `Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date between '${start}' and '${end}'`,
       'Deals'),
 
     // Calls created this month
     coqlCountPaged(authHeader, `${user.name}:calls_made`,
-      `Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`,
+      `Owner = '${userId}' AND Created_Time between '${from}' and '${to}'`,
       'Calls')
   ]);
 
