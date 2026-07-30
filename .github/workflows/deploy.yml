@@ -1,0 +1,38 @@
+name: Deploy to Catalyst
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy WorkStatus to Catalyst
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Catalyst CLI
+        run: npm install -g zcatalyst-cli
+
+      - name: Install function dependencies
+        run: |
+          cd functions/crm-monthly-stats
+          npm install
+
+      - name: Deploy to Catalyst (Development)
+        env:
+          CATALYST_TOKEN: ${{ secrets.CATALYST_TOKEN }}
+        run: |
+          catalyst deploy \
+            --token "$CATALYST_TOKEN" \
+            --org 60070296468 \
+            --dc in \
+            -p 38884000000206001
