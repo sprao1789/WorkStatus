@@ -433,6 +433,75 @@ app.get('/debug/coql', async (req, res) => {
   }
 });
 
+// POST-based debug endpoint — use this when your query contains + (datetime tz offsets)
+// Usage: curl -X POST .../debug/coql -H 'Content-Type: application/json' -d '{"q":"SELECT ..."}'
+app.post('/debug/coql', async (req, res) => {
+  try {
+    const app_cat    = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
+    const query      = req.body && req.body.q;
+    if (!query) {
+      return res.status(400).json({ error: 'Missing body.q field' });
+    }
+    const body = await crmPost(authHeader, '/crm/v3/coql', { select_query: query });
+    return res.json({ query, response: body });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Live count for a user — runs the same queries as fetchUserStats so you can verify
+// GET /debug/usercount?userId=1034369000001145895&start=2026-07-01&end=2026-07-31
+app.get('/debug/usercount', async (req, res) => {
+  try {
+    const app_cat    = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
+    const { userId, start, end } = req.query;
+
+    if (!userId || !start || !end) {
+      return res.status(400).json({ error: 'Missing ?userId=&start=YYYY-MM-DD&end=YYYY-MM-DD' });
+    }
+
+    const from = `${start}T00:00:00+05:30`;
+    const to   = `${end}T23:59:59+05:30`;
+
+    const results = {};
+    const queries = {
+      tasks_open:      `Owner = '${userId}' AND Status != 'Completed'`,
+      tasks_assigned:  `Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`,
+      tasks_completed: `Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`,
+      bugs_open:       `Owner = '${userId}' AND Status = 'Open'`,
+      bugs_closed:     `Owner = '${userId}' AND (Status = 'Closed' OR Status = 'Fixed') AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`,
+      bugs_reported:   `Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`,
+    };
+
+    const modules = {
+      tasks_open: 'Tasks', tasks_assigned: 'Tasks', tasks_completed: 'Tasks',
+      bugs_open: BUGS_MODULE, bugs_closed: BUGS_MODULE, bugs_reported: BUGS_MODULE,
+    };
+
+    for (const [key, where] of Object.entries(queries)) {
+      const query = `SELECT id FROM ${modules[key]} WHERE ${where} LIMIT 200 OFFSET 0`;
+      try {
+        const body = await crmPost(authHeader, '/crm/v3/coql', { select_query: query });
+        if (body.status === 'error' || body.code) {
+          results[key] = { error: body.message || body.code, query };
+        } else {
+          const count = (body.data || []).length;
+          const more  = body.info && body.info.more_records;
+          results[key] = { count_page1: count, more_records: more, query };
+        }
+      } catch (e) {
+        results[key] = { error: e.message, query };
+      }
+    }
+
+    return res.json({ userId, period: { start, end, from, to }, results });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/debug/sample', async (req, res) => {
   try {
     const app_cat    = catalyst.initialize(req);
