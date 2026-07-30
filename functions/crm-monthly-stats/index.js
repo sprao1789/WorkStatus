@@ -99,10 +99,12 @@ function crmPost(token, path, body) {
 }
 
 // ─── Get access token from Catalyst connection ─────────────────────────────────
+// Uses the Catalyst built-in Connections service (app.connections().getConnectionCredentials)
+// which returns { access_token, token_type, expiry_time_in_seconds }
 
 async function getToken(catalystApp) {
-  const connector = catalystApp.connection().getConnector('zoho_crm_connection');
-  return await connector.getAccessToken();
+  const creds = await catalystApp.connections().getConnectionCredentials('zoho_crm_connection');
+  return creds.access_token;
 }
 
 // ─── CRM helpers ──────────────────────────────────────────────────────────────
