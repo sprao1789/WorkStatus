@@ -121,13 +121,18 @@ async function coqlCount(token, query) {
 }
 
 async function getAllUsers(token) {
-  try {
-    const body = await crmGet(token, '/crm/v3/users?type=AllUsers&per_page=200');
-    return body.users || [];
-  } catch (e) {
-    console.error('getAllUsers error:', e.message);
-    return [];
+  // Try multiple user types to find what works with this org
+  const types = ['AllUsers', 'ActiveUsers', 'AdminUsers'];
+  for (const type of types) {
+    try {
+      const body = await crmGet(token, `/crm/v3/users?type=${type}&per_page=200`);
+      console.log(`[getUserType=${type}] status=${body.status_code} count=${(body.users||[]).length} info=${JSON.stringify(body.info||{})}`);
+      if (body.users && body.users.length > 0) return body.users;
+    } catch (e) {
+      console.error(`getAllUsers[${type}] error:`, e.message);
+    }
   }
+  return [];
 }
 
 function findUserId(users, email) {
@@ -286,19 +291,35 @@ app.get('/healthz', (req, res) => {
   res.json({ ok: true, service: 'WorkStatus Team Dashboard', ts: new Date().toISOString() });
 });
 
-// Debug: list all CRM users so we can verify the exact emails
+// Debug: list all CRM users — returns raw API response for each type
 app.get('/debug/users', async (req, res) => {
   try {
     const app_cat = catalyst.initialize(req);
-    const token   = await getToken(app_cat);
-    const users   = await getAllUsers(token);
-    return res.json({
-      total: users.length,
-      users: users.map(u => ({ id: u.id, email: u.email, name: u.full_name || u.name, status: u.status }))
-    });
+    const creds   = await app_cat.connections().getConnectionCredentials('zoho_crm_connection');
+    const token   = creds.access_token;
+
+    const results = { token_preview: token ? token.substring(0,20)+'...' : 'null', types: {} };
+
+    for (const type of ['AllUsers', 'ActiveUsers', 'AdminUsers']) {
+      try {
+        const raw = await crmGet(token, `/crm/v3/users?type=${type}&per_page=200`);
+        results.types[type] = {
+          count: (raw.users || []).length,
+          status: raw.status,
+          code: raw.code,
+          message: raw.message,
+          info: raw.info,
+          sample: (raw.users || []).slice(0,3).map(u => ({ id: u.id, email: u.email, name: u.full_name || u.name }))
+        };
+      } catch (e) {
+        results.types[type] = { error: e.message };
+      }
+    }
+
+    return res.json(results);
   } catch (err) {
     console.error('/debug/users error:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
 
