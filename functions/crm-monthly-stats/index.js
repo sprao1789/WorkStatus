@@ -14,10 +14,18 @@
  *   - harish.subramanian@zohocorp.com
  *
  * Routes:
- *   GET /server/crm-monthly-stats/            → JSON stats
- *   GET /server/crm-monthly-stats/widget      → HTML widget
- *   GET /server/crm-monthly-stats/healthz     → { ok: true }
- *   GET /server/crm-monthly-stats/debug/users → list all CRM users (for debugging)
+ *   GET /server/crm-monthly-stats/                → JSON stats
+ *   GET /server/crm-monthly-stats/widget          → HTML widget
+ *   GET /server/crm-monthly-stats/healthz         → { ok: true }
+ *   GET /server/crm-monthly-stats/debug/users     → list CRM users
+ *   GET /server/crm-monthly-stats/debug/modules   → list all CRM modules (find CustomModule2 API name)
+ *   GET /server/crm-monthly-stats/debug/coql      → run a test COQL query
+ *
+ * BUG FIX NOTE:
+ *   Bugs/Issues in this org live in a custom module (CustomModule2 in the URL).
+ *   The API name for that module is discovered via /debug/modules.
+ *   Set BUGS_MODULE below to the correct API name once confirmed.
+ *   Common values: "Bugs", "Issues", "CustomModule2", "CustomModule3", etc.
  */
 
 'use strict';
@@ -28,6 +36,18 @@ const catalyst = require('zcatalyst-sdk-node');
 
 const app = express();
 app.use(express.json());
+
+// ─── BUG MODULE CONFIG ────────────────────────────────────────────────────────
+//
+// YOUR BUG MODULE IS A CUSTOM MODULE (visible as CustomModule2 in the CRM URL).
+// To find the correct API name, deploy this code and hit:
+//   GET /server/crm-monthly-stats/debug/modules
+// Look for the module with plural_label "Bugs" or similar.
+// Then set BUGS_MODULE to its "api_name" value below.
+//
+// Common API names seen in Zoho CRM orgs: "Bugs", "Issues", "CustomModule2__c"
+// For now we default to "Bugs" — the most common name for this type of module.
+const BUGS_MODULE = 'Bugs';
 
 // Strip /server/crm-monthly-stats prefix so Express routes use clean paths
 app.use((req, _res, next) => {
@@ -49,7 +69,6 @@ const TEAM = [
 ];
 
 // ─── HTTP helpers using Node https ────────────────────────────────────────────
-// authHeader = the full Authorization header value e.g. "Zoho-oauthtoken 1000.xxx..."
 
 function crmGet(authHeader, path) {
   return new Promise((resolve, reject) => {
@@ -100,9 +119,6 @@ function crmPost(authHeader, path, body) {
 }
 
 // ─── Get auth header from Catalyst connection ─────────────────────────────────
-// getConnectionCredentials returns:
-//   { headers: { Authorization: "Zoho-oauthtoken 1000.xxxx..." }, parameters: {} }
-// We extract the Authorization header value and pass it directly to CRM API calls.
 
 async function getAuthHeader(catalystApp) {
   const creds = await catalystApp.connections().getConnectionCredentials('zoho_crm_connection');
@@ -113,13 +129,35 @@ async function getAuthHeader(catalystApp) {
 
 // ─── CRM helpers ──────────────────────────────────────────────────────────────
 
-async function coqlCount(authHeader, query) {
+/**
+ * Run a COQL SELECT count(...) query and return the count.
+ * Returns 0 on any error, and logs the full CRM response for debugging.
+ */
+async function coqlCount(authHeader, label, query) {
   try {
     const body = await crmPost(authHeader, '/crm/v3/coql', { select_query: query });
-    return (body.data && body.data[0] && body.data[0].count !== undefined)
-      ? body.data[0].count : 0;
+
+    // Log the full response for debugging (will appear in Catalyst function logs)
+    if (body.status === 'error' || body.code) {
+      console.error(`[COQL][${label}] Error response:`, JSON.stringify(body).substring(0, 400));
+      return 0;
+    }
+
+    if (body.data && body.data[0] !== undefined) {
+      // COUNT returns a single row; the column may be named "count" or the aggregate alias
+      const row = body.data[0];
+      const val = row.count !== undefined ? row.count
+                : row.cnt   !== undefined ? row.cnt
+                : Object.values(row)[0];
+      console.log(`[COQL][${label}] count=${val}`);
+      return typeof val === 'number' ? val : parseInt(val, 10) || 0;
+    }
+
+    // No data rows — module exists but nothing matches
+    console.log(`[COQL][${label}] no data rows (0)`);
+    return 0;
   } catch (e) {
-    console.error('COQL error:', e.message);
+    console.error(`[COQL][${label}] exception:`, e.message);
     return 0;
   }
 }
@@ -133,7 +171,6 @@ async function findUserIdByEmail(authHeader, email) {
       const users = body.users || [];
       const match = users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
       if (match) return match.id;
-      // Stop if no more pages
       if (!body.info || !body.info.more_records || users.length < 200) break;
       page++;
     } catch (e) {
@@ -157,28 +194,68 @@ async function fetchUserStats(authHeader, user, userId, start, end) {
     };
   }
 
-  const tz   = '+05:30';
-  const from = `${start}T00:00:00${tz}`;
-  const to   = `${end}T23:59:59${tz}`;
+  // Zoho CRM COQL datetime format: 'YYYY-MM-DDTHH:MM:SS+05:30'
+  // NOTE: The timezone suffix must NOT be URL-encoded in the query string;
+  //       it's fine inside the POST body.
+  const from = `${start}T00:00:00+05:30`;
+  const to   = `${end}T23:59:59+05:30`;
+
+  // Bug module status values — adjust if your module uses different picklist values.
+  // Common patterns:
+  //   Open bugs: Status != 'Closed' (or != 'Fixed', != 'Verified')
+  //   Closed bugs: Status = 'Closed' (or = 'Fixed', or = 'Verified')
+  // We use a broad "not closed/not verified/not fixed" for open bugs.
+  const bugOpenStatuses  = `Status != 'Closed' AND Status != 'Fixed' AND Status != 'Verified'`;
+  const bugClosedStatus  = `Status = 'Closed'`;
+
+  console.log(`[WorkStatus] Fetching stats for ${user.email} (id=${userId}), period ${start}..${end}, bugs module=${BUGS_MODULE}`);
 
   const [
     tasksAssigned, tasksCompleted, tasksOpen,
     bugsOpen, bugsClosed, bugsAssignedBy,
     dealsOwned, dealsWon, callsMade
   ] = await Promise.all([
-    coqlCount(authHeader, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(authHeader, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
-    coqlCount(authHeader, `SELECT count(id) as count FROM Tasks WHERE Owner = '${userId}' AND Status != 'Completed'`),
-    coqlCount(authHeader, `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status != 'Closed'`),
-    coqlCount(authHeader, `SELECT count(id) as count FROM Cases WHERE Owner = '${userId}' AND Status = 'Closed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
-    coqlCount(authHeader, `SELECT count(id) as count FROM Cases WHERE Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(authHeader, `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
-    coqlCount(authHeader, `SELECT count(id) as count FROM Deals WHERE Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`),
-    coqlCount(authHeader, `SELECT count(id) as count FROM Calls WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`)
+
+    // Tasks — created this month, owned by user
+    coqlCount(authHeader, `${user.name}:tasks_assigned`,
+      `SELECT count(id) FROM Tasks WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+
+    // Tasks — completed (status=Completed) this month
+    coqlCount(authHeader, `${user.name}:tasks_completed`,
+      `SELECT count(id) FROM Tasks WHERE Owner = '${userId}' AND Status = 'Completed' AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
+
+    // Tasks — currently open (no date filter, all time)
+    coqlCount(authHeader, `${user.name}:tasks_open`,
+      `SELECT count(id) FROM Tasks WHERE Owner = '${userId}' AND Status != 'Completed'`),
+
+    // Bugs — open (all time, owned by user) — uses BUGS_MODULE not Cases
+    coqlCount(authHeader, `${user.name}:bugs_open`,
+      `SELECT count(id) FROM ${BUGS_MODULE} WHERE Owner = '${userId}' AND ${bugOpenStatuses}`),
+
+    // Bugs — closed this month (owned by user)
+    coqlCount(authHeader, `${user.name}:bugs_closed`,
+      `SELECT count(id) FROM ${BUGS_MODULE} WHERE Owner = '${userId}' AND ${bugClosedStatus} AND Modified_Time >= '${from}' AND Modified_Time <= '${to}'`),
+
+    // Bugs — reported/created by user this month (regardless of owner)
+    coqlCount(authHeader, `${user.name}:bugs_reported`,
+      `SELECT count(id) FROM ${BUGS_MODULE} WHERE Created_By = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+
+    // Deals — created this month, owned by user
+    coqlCount(authHeader, `${user.name}:deals_owned`,
+      `SELECT count(id) FROM Deals WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`),
+
+    // Deals — won this month (Closing_Date is a Date, not DateTime — use date format only)
+    coqlCount(authHeader, `${user.name}:deals_won`,
+      `SELECT count(id) FROM Deals WHERE Owner = '${userId}' AND Stage = 'Closed Won' AND Closing_Date >= '${start}' AND Closing_Date <= '${end}'`),
+
+    // Calls — created this month, owned by user
+    coqlCount(authHeader, `${user.name}:calls_made`,
+      `SELECT count(id) FROM Calls WHERE Owner = '${userId}' AND Created_Time >= '${from}' AND Created_Time <= '${to}'`)
   ]);
 
   return {
     email: user.email, name: user.name, user_id: userId,
+    bugs_module:           BUGS_MODULE,
     tasks_assigned:        tasksAssigned,
     tasks_completed:       tasksCompleted,
     tasks_open:            tasksOpen,
@@ -298,7 +375,7 @@ app.get('/healthz', (req, res) => {
 // Debug: list all CRM users — returns raw API response for each type
 app.get('/debug/users', async (req, res) => {
   try {
-    const app_cat  = catalyst.initialize(req);
+    const app_cat    = catalyst.initialize(req);
     const authHeader = await getAuthHeader(app_cat);
 
     const results = { auth_preview: authHeader.substring(0,30)+'...', types: {} };
@@ -325,6 +402,95 @@ app.get('/debug/users', async (req, res) => {
   }
 });
 
+/**
+ * Debug: list all CRM modules.
+ * Use this to find the API name for your bugs module (CustomModule2 in the CRM URL).
+ * Look for module where plural_label = "Bugs" or similar.
+ * The "api_name" field is what you put in BUGS_MODULE at the top of this file.
+ *
+ * GET /server/crm-monthly-stats/debug/modules
+ */
+app.get('/debug/modules', async (req, res) => {
+  try {
+    const app_cat    = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
+
+    const raw = await crmGet(authHeader, '/crm/v3/settings/modules');
+
+    const modules = (raw.modules || []).map(m => ({
+      id:           m.id,
+      api_name:     m.api_name,
+      module_name:  m.module_name,
+      plural_label: m.plural_label,
+      singular_label: m.singular_label,
+      is_custom:    m.generated_type === 'custom'
+    }));
+
+    // Highlight custom modules (they're likely your CustomModule2 etc.)
+    const customModules = modules.filter(m => m.is_custom);
+
+    return res.json({
+      note: 'Find your bugs module in custom_modules. Set BUGS_MODULE in index.js to the api_name value.',
+      current_bugs_module: BUGS_MODULE,
+      custom_modules: customModules,
+      all_modules: modules
+    });
+  } catch (err) {
+    console.error('/debug/modules error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Debug: run a raw COQL query and see the full CRM response.
+ * GET /server/crm-monthly-stats/debug/coql?q=SELECT+count(id)+FROM+Bugs+WHERE+Owner+%3D+'12345'
+ * or POST with JSON body { "query": "SELECT ..." }
+ */
+app.get('/debug/coql', async (req, res) => {
+  try {
+    const app_cat    = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
+    const query      = req.query.q;
+
+    if (!query) {
+      return res.status(400).json({
+        error: 'Missing query param ?q=',
+        example: `/debug/coql?q=${encodeURIComponent(`SELECT count(id) FROM ${BUGS_MODULE} LIMIT 1`)}`
+      });
+    }
+
+    const body = await crmPost(authHeader, '/crm/v3/coql', { select_query: query });
+    return res.json({ query, response: body });
+  } catch (err) {
+    console.error('/debug/coql error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Debug: fetch a sample of records from any module for a given user.
+ * GET /server/crm-monthly-stats/debug/sample?module=Bugs&userId=1234567890
+ */
+app.get('/debug/sample', async (req, res) => {
+  try {
+    const app_cat    = catalyst.initialize(req);
+    const authHeader = await getAuthHeader(app_cat);
+    const module     = req.query.module || BUGS_MODULE;
+    const userId     = req.query.userId;
+
+    let query = `SELECT id, Owner, Status, Created_Time FROM ${module} LIMIT 5`;
+    if (userId) {
+      query = `SELECT id, Owner, Status, Created_Time FROM ${module} WHERE Owner = '${userId}' LIMIT 5`;
+    }
+
+    const body = await crmPost(authHeader, '/crm/v3/coql', { select_query: query });
+    return res.json({ module, userId: userId || 'any', query, response: body });
+  } catch (err) {
+    console.error('/debug/sample error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.get(['/', '/widget'], async (req, res) => {
   try {
     const app_cat    = catalyst.initialize(req);
@@ -343,7 +509,7 @@ app.get(['/', '/widget'], async (req, res) => {
 
     const wantHTML = req.query.format === 'html' || req.path.endsWith('/widget');
 
-    console.log(`[WorkStatus] Fetching team stats for ${monthName}`);
+    console.log(`[WorkStatus] Fetching team stats for ${monthName}, bugs module=${BUGS_MODULE}`);
 
     // Resolve user IDs for each team member in parallel
     const teamStats = await Promise.all(
@@ -361,7 +527,7 @@ app.get(['/', '/widget'], async (req, res) => {
     }
 
     res.setHeader('Cache-Control', 'no-store, max-age=0');
-    return res.json({ month: monthName, period: { start, end }, team: teamStats, generated_at: new Date().toISOString() });
+    return res.json({ month: monthName, period: { start, end }, bugs_module: BUGS_MODULE, team: teamStats, generated_at: new Date().toISOString() });
 
   } catch (err) {
     console.error('[WorkStatus] Error:', err);
