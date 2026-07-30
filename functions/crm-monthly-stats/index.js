@@ -35,12 +35,25 @@ app.use(express.json());
 const BUGS_MODULE = 'Bugs';
 const PAGE_SIZE   = 200;
 
-// Bug "open" statuses (all non-terminal states)
-const OPEN_STATUSES   = ['Open', 'In progress', 'To be tested', 'Dependency Service Fixed'];
-// Bug "closed/resolved" statuses
-const CLOSED_STATUSES = ['Fixed', 'Fixed by other checkins', 'Fixed By DB update',
-                          'Closed', 'Closed - Not reproducible', 'Closed - Not an issue',
-                          'Not an Issue', 'Not Reproducible', 'Duplicate Issue'];
+// ── All statuses confirmed from live data ─────────────────────────────────────
+// ACTIVE (open/in-progress) statuses
+const ACTIVE_STATUSES = [
+  'Open', 'In progress', 'To be tested', 'Reopen',
+  'Need to fix in automation', 'To be tested - Not an Issue',
+  'Product flow change', 'Dependency Service Fixed'
+];
+// CLOSED / RESOLVED statuses
+const CLOSED_STATUSES = [
+  'Fixed', 'Fixed by other checkins', 'Fixed By DB update',
+  'Closed', 'Closed - Not reproducible', 'Closed - Not an issue',
+  'Closed - Wrong interpretation of test case',
+  'Not an Issue', 'Not Reproducible', 'Not Resolved',
+  'Duplicate Issue', 'Wrong interpretation of testcase',
+  'fixed in automation', 'Reverted'
+];
+// Severity values in this org: MustFix, Show stopper (not standard Critical/Major/Minor)
+// OPEN_STATUSES kept for backward compat
+const OPEN_STATUSES = ACTIVE_STATUSES;
 
 app.use((req, _res, next) => {
   const prefix = '/server/crm-monthly-stats';
@@ -222,10 +235,13 @@ async function fetchUserBugDetail(authHeader, userId, start, end) {
   const from = toUtcDatetime(start, false);
   const to   = toUtcDatetime(end, true);
 
+  // Build the COQL exclusion list from all known closed statuses
+  const closedStatusCoql = CLOSED_STATUSES.map(s => `'${s}'`).join(', ');
+
   const [allBugs, reportedThisMonth, statusHistory] = await Promise.all([
-    // All open bugs owned by user
+    // All active bugs owned by user — exclude ALL closed/resolved statuses
     coqlFetchAll(authHeader, ['id','Name','Status','Severity','Created_Time','Modified_Time'],
-      BUGS_MODULE, `Owner = '${userId}' AND Status not in ('Closed', 'Closed - Not reproducible', 'Closed - Not an issue', 'Not an Issue', 'Not Reproducible', 'Duplicate Issue', 'Dependency Service Fixed', 'Fixed', 'Fixed by other checkins', 'Fixed By DB update')`),
+      BUGS_MODULE, `Owner = '${userId}' AND Status not in (${closedStatusCoql})`),
     // Bugs reported this month by user
     coqlFetchAll(authHeader, ['id','Name','Status','Severity','Created_Time'],
       BUGS_MODULE, `Created_By = '${userId}' AND Created_Time between '${from}' and '${to}'`),
@@ -245,31 +261,52 @@ async function fetchUserBugDetail(authHeader, userId, start, end) {
 }
 
 // ─── HTML helpers ─────────────────────────────────────────────────────────────
+// Colors for ALL status values confirmed from live data
 const STATUS_COLORS = {
-  'Open':                        '#e03131',
-  'In progress':                 '#e67700',
-  'To be tested':                '#1971c2',
-  'Fixed':                       '#2f9e44',
-  'Fixed by other checkins':     '#2f9e44',
-  'Fixed By DB update':          '#2f9e44',
-  'Closed':                      '#495057',
-  'Closed - Not reproducible':   '#868e96',
-  'Closed - Not an issue':       '#868e96',
-  'Not an Issue':                '#868e96',
-  'Not Reproducible':            '#868e96',
-  'Duplicate Issue':             '#868e96',
-  'Dependency Service Fixed':    '#9c36b5'
+  // Active statuses
+  'Open':                                    '#e03131',
+  'In progress':                             '#e67700',
+  'To be tested':                            '#1971c2',
+  'To be tested - Not an Issue':             '#1971c2',
+  'Reopen':                                  '#c92a2a',
+  'Need to fix in automation':               '#7048e8',
+  'Product flow change':                     '#7048e8',
+  'Dependency Service Fixed':                '#9c36b5',
+  // Fixed / resolved
+  'Fixed':                                   '#2f9e44',
+  'Fixed by other checkins':                 '#2f9e44',
+  'Fixed By DB update':                      '#2f9e44',
+  'fixed in automation':                     '#2f9e44',
+  'Reverted':                                '#2f9e44',
+  // Closed statuses
+  'Closed':                                  '#495057',
+  'Closed - Not reproducible':               '#868e96',
+  'Closed - Not an issue':                   '#868e96',
+  'Closed - Wrong interpretation of test case': '#868e96',
+  'Not an Issue':                            '#868e96',
+  'Not Reproducible':                        '#868e96',
+  'Not Resolved':                            '#868e96',
+  'Duplicate Issue':                         '#868e96',
+  'Wrong interpretation of testcase':        '#868e96',
 };
 
 function statusBadge(status) {
-  const color = STATUS_COLORS[status] || '#aaa';
+  const color = STATUS_COLORS[status] || '#999';
   return `<span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;color:#fff;background:${color};white-space:nowrap">${status || 'Unknown'}</span>`;
 }
 
+// Severity values in this org: MustFix, Show stopper (not standard Critical/Major/Minor)
 function severityBadge(sev) {
   if (!sev) return '';
-  const map = { 'Critical':'#c92a2a', 'Major':'#e67700', 'Minor':'#1971c2', 'Trivial':'#868e96' };
-  const c = map[sev] || '#555';
+  const map = {
+    'Show stopper': '#c92a2a',
+    'MustFix':      '#e67700',
+    'Critical':     '#c92a2a',
+    'Major':        '#e67700',
+    'Minor':        '#1971c2',
+    'Trivial':      '#868e96'
+  };
+  const c = map[sev] || '#666';
   return `<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;color:#fff;background:${c};margin-left:4px">${sev}</span>`;
 }
 
@@ -632,8 +669,11 @@ function statusBadge(s) {
 }
 function severityBadge(s) {
   if(!s) return '';
-  const m={'Critical':'#c92a2a','Major':'#e67700','Minor':'#1971c2','Trivial':'#868e96'};
-  return '<span style="padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;color:#fff;background:'+(m[s]||'#555')+';margin-left:4px">'+s+'</span>';
+  const m={
+    'Show stopper':'#c92a2a','MustFix':'#e67700',
+    'Critical':'#c92a2a','Major':'#e67700','Minor':'#1971c2','Trivial':'#868e96'
+  };
+  return '<span style="padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;color:#fff;background:'+(m[s]||'#666')+';margin-left:4px">'+s+'</span>';
 }
 
 // ── Show section ───────────────────────────────────────────────────────────
