@@ -326,6 +326,9 @@ async function fetchUserManagerSnapshot(authHeader, user, userId, start, end) {
   return {
     ...summary,
     timeline: timeline.slice(0, 50),
+    tasks_timeline: taskTimeline,
+    deals_timeline: dealTimeline,
+    bugs_reported_timeline: bugReportedTimeline,
     visual_work_items: visualWorkItems,
     visual_status_counts: visualStatusCounts,
     calls_available: false,
@@ -334,6 +337,7 @@ async function fetchUserManagerSnapshot(authHeader, user, userId, start, end) {
 }
 
 function buildManagerHTML(periodLabel, snapshots, baseUrl, start, end) {
+  const snapshotsJson = JSON.stringify(snapshots);
   const cards = snapshots.map(s => {
     const totalActivity = s.bugs_reported + s.tasks_assigned + s.deals_owned;
     const visualBlock = s.email === 'paparao.s@zohocorp.com' ? `
@@ -425,6 +429,28 @@ function buildManagerHTML(periodLabel, snapshots, baseUrl, start, end) {
   .tl-title{font-size:12px;font-weight:700;color:#e5e7eb}
   .tl-meta{font-size:10px;color:var(--muted);margin-top:2px}
   .mgr-empty{font-size:12px;color:var(--muted);padding:12px 2px}
+  .console{margin-top:22px;background:linear-gradient(180deg,#0b1220,#0f172a);border:1px solid var(--border);border-radius:22px;padding:18px}
+  .console-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .console-title{font-size:18px;font-weight:900}
+  .console-sub{font-size:12px;color:var(--muted);margin-top:4px}
+  .console-filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .console-filters select,.console-filters input{background:#020617;border:1px solid #334155;color:#e2e8f0;border-radius:10px;padding:9px 12px;font-size:12px}
+  .console-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .panel{background:#0b1220;border:1px solid #1e293b;border-radius:16px;padding:14px}
+  .panel h3{font-size:13px;font-weight:800;margin-bottom:10px;color:#e2e8f0}
+  .activity-list{display:flex;flex-direction:column;gap:8px;max-height:520px;overflow:auto;padding-right:4px}
+  .activity-item{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:12px}
+  .activity-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+  .activity-title{font-size:12px;font-weight:800;color:#f8fafc}
+  .activity-badges{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .small-badge{background:#1e293b;border:1px solid #334155;color:#cbd5e1;border-radius:999px;padding:3px 8px;font-size:10px;font-weight:700}
+  .activity-time{font-size:10px;color:#94a3b8;white-space:nowrap}
+  .activity-meta{margin-top:6px;font-size:11px;color:#94a3b8;line-height:1.5}
+  .timeline-table{width:100%;border-collapse:collapse}
+  .timeline-table th,.timeline-table td{padding:8px 10px;border-bottom:1px solid #1f2937;font-size:11px;text-align:left;color:#cbd5e1;vertical-align:top}
+  .timeline-table th{font-size:10px;color:#94a3b8;text-transform:uppercase}
+  .empty-state{font-size:12px;color:#94a3b8;padding:16px;text-align:center}
+  @media(max-width:980px){.console-grid{grid-template-columns:1fr}}
   @media(max-width:1000px){.top-grid{grid-template-columns:repeat(2,1fr)}}
   @media(max-width:640px){.top-grid{grid-template-columns:1fr}.mgr-metrics{grid-template-columns:repeat(2,1fr)}.wrap{padding:16px}}
   </style>
@@ -460,7 +486,159 @@ function buildManagerHTML(periodLabel, snapshots, baseUrl, start, end) {
   </div>
 
   <div class="mgr-grid">${cards}</div>
+
+  <div class="console">
+    <div class="console-head">
+      <div>
+        <div class="console-title">Daily Activity Console</div>
+        <div class="console-sub">Filter one user and inspect tasks created/completed, bugs reported/updated, and deals created within the selected date range</div>
+      </div>
+    </div>
+
+    <div class="console-filters">
+      <select id="userFilter" onchange="renderManagerConsole()">
+        <option value="all">All Users</option>
+        ${snapshots.map(s => `<option value="${s.user_id}">${s.name}</option>`).join('')}
+      </select>
+      <select id="moduleFilter" onchange="renderManagerConsole()">
+        <option value="all">All Modules</option>
+        <option value="task">Tasks</option>
+        <option value="bug">Bugs</option>
+        <option value="deal">Deals</option>
+        <option value="visual">Visual Test</option>
+      </select>
+      <select id="statusFilter" onchange="renderManagerConsole()">
+        <option value="all">All Statuses</option>
+      </select>
+      <input id="searchFilter" type="text" placeholder="Search feature / task / bug name" oninput="renderManagerConsole()">
+    </div>
+
+    <div class="console-grid">
+      <div class="panel">
+        <h3>Timeline of Work</h3>
+        <div id="activityList" class="activity-list"></div>
+      </div>
+      <div class="panel">
+        <h3>Timestamp Table</h3>
+        <div id="timestampTableWrap"></div>
+      </div>
+    </div>
+  </div>
 </div>
+
+<script>
+const SNAPSHOTS = ${snapshotsJson};
+
+function buildActivityRows() {
+  const rows = [];
+  SNAPSHOTS.forEach(u => {
+    (u.tasks_timeline || []).forEach(t => rows.push({
+      userId: u.user_id, user: u.name, module:'task',
+      title: t.Subject || '(task)',
+      status: t.Status || 'Unknown',
+      created: t.Created_Time || '',
+      updated: t.Modified_Time || '',
+      detail: `Task created: ${t.Created_Time || '-'} | Last modified/completed: ${t.Modified_Time || '-'}`,
+      icon: '📋'
+    }));
+    (u.bugs_reported_timeline || []).forEach(b => rows.push({
+      userId: u.user_id, user: u.name, module:'bug',
+      title: b.Name || '(bug)',
+      status: b.Status || 'Unknown',
+      created: b.Created_Time || '',
+      updated: b.Modified_Time || '',
+      detail: `Bug reported on: ${b.Created_Time || '-'} | Last known update: ${b.Modified_Time || '-'}`,
+      icon: '🐛'
+    }));
+    (u.deals_timeline || []).forEach(d => rows.push({
+      userId: u.user_id, user: u.name, module:'deal',
+      title: d.Deal_Name || '(deal)',
+      status: d.Stage || 'Unknown',
+      created: d.Created_Time || '',
+      updated: d.Closing_Date || '',
+      detail: `Deal created: ${d.Created_Time || '-'} | Closing date: ${d.Closing_Date || '-'}`,
+      icon: '💼'
+    }));
+    (u.visual_work_items || []).forEach(v => rows.push({
+      userId: u.user_id, user: u.name, module:'visual',
+      title: v.Name || '(visual feature)',
+      status: v.UI_cases_added || 'Unknown',
+      created: '',
+      updated: v.Modified_Time || '',
+      detail: `Visual Test status: ${v.UI_cases_added || '-'} | Last modified: ${v.Modified_Time || '-'}`,
+      icon: '🖼️'
+    }));
+  });
+  return rows.sort((a,b) => String(b.updated || b.created || '').localeCompare(String(a.updated || a.created || '')));
+}
+
+const ALL_ROWS = buildActivityRows();
+
+function refreshStatusOptions(filteredRows) {
+  const select = document.getElementById('statusFilter');
+  const current = select.value;
+  const statuses = Array.from(new Set(filteredRows.map(r => r.status).filter(Boolean))).sort();
+  select.innerHTML = '<option value="all">All Statuses</option>' + statuses.map(s => `<option value="${s}">${s}</option>`).join('');
+  if (statuses.includes(current)) select.value = current;
+}
+
+function renderManagerConsole() {
+  const userId = document.getElementById('userFilter').value;
+  const module = document.getElementById('moduleFilter').value;
+  const status = document.getElementById('statusFilter').value;
+  const q = (document.getElementById('searchFilter').value || '').toLowerCase();
+
+  let rows = ALL_ROWS.filter(r => (userId === 'all' || r.userId === userId) && (module === 'all' || r.module === module));
+  refreshStatusOptions(rows);
+  rows = rows.filter(r => (status === 'all' || r.status === status) && (!q || r.title.toLowerCase().includes(q) || r.user.toLowerCase().includes(q)));
+
+  const list = document.getElementById('activityList');
+  const tableWrap = document.getElementById('timestampTableWrap');
+
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty-state">No activity found for the selected filters</div>';
+    tableWrap.innerHTML = '<div class="empty-state">No timestamp rows to show</div>';
+    return;
+  }
+
+  list.innerHTML = rows.slice(0, 80).map(r => `
+    <div class="activity-item">
+      <div class="activity-top">
+        <div>
+          <div class="activity-title">${r.icon} ${r.title}</div>
+          <div class="activity-badges">
+            <span class="small-badge">${r.user}</span>
+            <span class="small-badge">${r.module}</span>
+            <span class="small-badge">${r.status}</span>
+          </div>
+        </div>
+        <div class="activity-time">${(r.updated || r.created || '').replace('T',' ').slice(0,16)}</div>
+      </div>
+      <div class="activity-meta">${r.detail}</div>
+    </div>
+  `).join('');
+
+  tableWrap.innerHTML = `
+    <table class="timeline-table">
+      <thead>
+        <tr><th>User</th><th>Module</th><th>Title</th><th>Status</th><th>Created</th><th>Updated/Completed</th></tr>
+      </thead>
+      <tbody>
+        ${rows.slice(0, 120).map(r => `
+          <tr>
+            <td>${r.user}</td>
+            <td>${r.module}</td>
+            <td>${r.title}</td>
+            <td>${r.status}</td>
+            <td>${(r.created || '').replace('T',' ').slice(0,16)}</td>
+            <td>${(r.updated || '').replace('T',' ').slice(0,16)}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+renderManagerConsole();
+</script>
 </body>
 </html>`;
 }
